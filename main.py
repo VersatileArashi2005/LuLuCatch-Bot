@@ -1,11 +1,7 @@
 import os
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 import uvicorn
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -66,15 +62,21 @@ async def webhook(request: Request):
     return {"ok": True}
 
 
-# Set webhook on startup
+# Startup & Shutdown events
 @app.on_event("startup")
 async def startup():
     await application.initialize()
+    # Railway အတွက် webhook set
     await application.bot.set_webhook(WEBHOOK_URL)
-    await application.start()
+    await application.start_polling()  # webhook mode နဲ့ conflict မဖြစ်စေရန် polling start မလုပ်သင့်
+
+@app.on_event("shutdown")
+async def shutdown():
+    await application.stop()
+    await application.shutdown()
 
 
-# Commands
+# Commands registration
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
 application.add_handler(CallbackQueryHandler(help_button, pattern="help_menu"))
@@ -82,4 +84,5 @@ application.add_handler(CallbackQueryHandler(help_button, pattern="help_menu"))
 
 # Run Uvicorn for Railway
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
