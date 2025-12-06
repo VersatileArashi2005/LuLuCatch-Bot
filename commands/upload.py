@@ -1,50 +1,80 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CallbackContext, ConversationHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import ContextTypes
+from db import get_anime_list, get_characters, add_anime, add_character, add_card
 
-ANIME, CHARACTER, RARITY, PHOTO = range(4)
+async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    anime_list = get_anime_list()
+    
+    keyboard = []
+    for anime in anime_list:
+        keyboard.append([InlineKeyboardButton(anime, callback_data=f"anime_{anime}")])
+    
+    # Add button to add new anime
+    keyboard.append([InlineKeyboardButton("Add Anime Name", callback_data="anime_add")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text("Step 1: Select Anime Name or Add New", reply_markup=reply_markup)
 
-def upload_start(update: Update, context: CallbackContext):
-    # Step 1: Anime Name buttons
-    keyboard = [[InlineKeyboardButton("One Piece", callback_data="anime_One Piece")]]
-    keyboard.append([InlineKeyboardButton("Add Anime Name", callback_data="add_anime")])
-    update.message.reply_text("Add Anime Name", reply_markup=InlineKeyboardMarkup(keyboard))
-    return ANIME
 
-def upload_anime(update: Update, context: CallbackContext):
+async def upload_anime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    query.answer()
-    context.user_data['anime'] = query.data.replace("anime_", "")
-    # Step 2: Character selection
-    keyboard = [[InlineKeyboardButton("Luffy", callback_data="char_Luffy")]]
-    keyboard.append([InlineKeyboardButton("Add Character", callback_data="add_char")])
-    query.edit_message_text("Add Character", reply_markup=InlineKeyboardMarkup(keyboard))
-    return CHARACTER
+    await query.answer()
+    data = query.data
+    
+    if data == "anime_add":
+        await query.edit_message_text("Send the new Anime Name in reply to this message.")
+        return
+    else:
+        context.user_data['anime'] = data.replace("anime_", "")
+        characters = get_characters(context.user_data['anime'])
+        keyboard = []
+        for char in characters:
+            keyboard.append([InlineKeyboardButton(char, callback_data=f"character_{char}")])
+        keyboard.append([InlineKeyboardButton("Add Character", callback_data="character_add")])
+        await query.edit_message_text("Step 2: Select Character or Add New", reply_markup=InlineKeyboardMarkup(keyboard))
 
-def upload_character(update: Update, context: CallbackContext):
+
+async def upload_character(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    query.answer()
-    context.user_data['character'] = query.data.replace("char_", "")
-    # Step 3: Rarity selection
-    rarities = {
-        "bronze": "100%", "silver": "90%", "rare": "80%", "epic": "70%",
-        "platinum": "40%", "emerald": "30%", "diamond": "10%",
-        "mythical": "5%", "legendary": "2%", "supernatural": "1%"
-    }
-    keyboard = [[InlineKeyboardButton(f"{key} 💎 {val}", callback_data=f"rar_{key}") for key,val in rarities.items()]]
-    query.edit_message_text("Select Rarity", reply_markup=InlineKeyboardMarkup(keyboard))
-    return RARITY
+    await query.answer()
+    data = query.data
+    
+    if data == "character_add":
+        await query.edit_message_text("Send the new Character Name in reply to this message.")
+        return
+    else:
+        context.user_data['character'] = data.replace("character_", "")
+        # Step 3: Rarity selection
+        keyboard = [
+            [InlineKeyboardButton("Bronze 💰", callback_data="rarity_1")],
+            [InlineKeyboardButton("Silver ⚪", callback_data="rarity_2")],
+            [InlineKeyboardButton("Rare 🔹", callback_data="rarity_3")],
+            [InlineKeyboardButton("Epic 🔥", callback_data="rarity_4")],
+            [InlineKeyboardButton("Platinum 💎", callback_data="rarity_5")],
+            [InlineKeyboardButton("Emerald 💚", callback_data="rarity_6")],
+            [InlineKeyboardButton("Diamond 💎", callback_data="rarity_7")],
+            [InlineKeyboardButton("Mythical 🌟", callback_data="rarity_8")],
+            [InlineKeyboardButton("Legendary 🏆", callback_data="rarity_9")],
+            [InlineKeyboardButton("Supernatural 👑", callback_data="rarity_10")],
+        ]
+        await query.edit_message_text("Step 3: Select Rarity", reply_markup=InlineKeyboardMarkup(keyboard))
 
-def upload_rarity(update: Update, context: CallbackContext):
+
+async def upload_rarity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    query.answer()
-    context.user_data['rarity'] = query.data.replace("rar_", "")
-    query.edit_message_text("Send Photo now")
-    return PHOTO
-
-def upload_photo(update: Update, context: CallbackContext):
-    file_id = update.message.photo[-1].file_id
-    from db import add_card
-    card_id = add_card(context.user_data['anime'], context.user_data['character'], context.user_data['rarity'], file_id)
-    update.message.reply_text(f"Card Added! ID: {card_id}, Anime: {context.user_data['anime']}, Character: {context.user_data['character']}")
-    # TODO: Notify all groups
-    return ConversationHandler.END
+    await query.answer()
+    rarity_id = int(query.data.replace("rarity_", ""))
+    context.user_data['rarity'] = rarity_id
+    
+    # Save card in DB
+    add_card(
+        name=context.user_data.get('character'),
+        anime=context.user_data.get('anime'),
+        rarity=rarity_id,
+        uploader_id=query.from_user.id
+    )
+    
+    await query.edit_message_text(f"✅ Card uploaded:\nAnime: {context.user_data.get('anime')}\nCharacter: {context.user_data.get('character')}\nRarity ID: {rarity_id}")
+    
+    # TODO: Notify groups
