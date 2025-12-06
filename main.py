@@ -2,58 +2,48 @@ import os
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
-import uvicorn
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 app = FastAPI()
 application = Application.builder().token(BOT_TOKEN).build()
 
 
-# /start handler
+# Handlers
 async def start(update, context):
     keyboard = [
         [InlineKeyboardButton("➕ Add me to your group", url=f"https://t.me/{context.bot.username}?startgroup=true")],
         [InlineKeyboardButton("🔗 Support", url="https://t.me/lulucatch")],
         [InlineKeyboardButton("❓ Help", callback_data="help_menu")]
     ]
-
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
-        "👋 Welcome to **LuLuCatch Bot**!\n\n"
-        "Use the buttons below to continue:",
+        "👋 Welcome!\nUse the buttons below to continue:",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
-
-# help button
 async def help_button(update, context):
     query = update.callback_query
     await query.answer()
-
     await query.edit_message_text(
-        "**Commands List**\n"
-        "/start - Show menu\n"
-        "/help - Show help\n"
-        "/ping - Check bot status",
+        "**Commands List**\n/start - Show menu\n/help - Show help",
         parse_mode="Markdown"
     )
 
-
-# Normal help command
 async def help_cmd(update, context):
     await update.message.reply_text(
-        "**Help Menu**\n"
-        "/start - Show menu\n"
-        "/help - Show help",
+        "**Help Menu**\n/start - Show menu\n/help - Show help",
         parse_mode="Markdown"
     )
 
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("help", help_cmd))
+application.add_handler(CallbackQueryHandler(help_button, pattern="help_menu"))
 
-# Webhook Receiver
+
+# Webhook receiver
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
@@ -62,27 +52,23 @@ async def webhook(request: Request):
     return {"ok": True}
 
 
-# Startup & Shutdown events
+# Startup
 @app.on_event("startup")
-async def startup():
+async def on_startup():
     await application.initialize()
-    # Railway အတွက် webhook set
     await application.bot.set_webhook(WEBHOOK_URL)
-    await application.start_polling()  # webhook mode နဲ့ conflict မဖြစ်စေရန် polling start မလုပ်သင့်
+    await application.start()  # no polling
 
+
+# Shutdown
 @app.on_event("shutdown")
-async def shutdown():
+async def on_shutdown():
     await application.stop()
     await application.shutdown()
 
 
-# Commands registration
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("help", help_cmd))
-application.add_handler(CallbackQueryHandler(help_button, pattern="help_menu"))
-
-
-# Run Uvicorn for Railway
+# Run with uvicorn
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
