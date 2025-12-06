@@ -1,4 +1,5 @@
 python-telegram-bot==20.8
 fastapi
 uvicorn
+psycopg2-binary
 pydantic
