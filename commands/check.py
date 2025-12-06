@@ -1,15 +1,19 @@
 from telegram import Update
-from telegram.ext import CallbackContext
-from db import get_card
+from telegram.ext import ContextTypes
+from db import get_card_by_id, get_rarity_info
 
-def check_card(update: Update, context: CallbackContext):
-    card_id = context.args[0]
-    card = get_card(card_id)
-    if card:
-        rarity_emotes = {
-            "bronze":"🥉", "silver":"🥈", "rare":"🔹", "epic":"✨", "platinum":"🏆",
-            "emerald":"💚", "diamond":"💎", "mythical":"🌟", "legendary":"🦄", "supernatural":"🛸"
-        }
-        emote = rarity_emotes.get(card['rarity'], "")
-        text = f"Name: {card['character']}\nID: {card['id']}\nAnime: {card['anime']}\nRarity: {card['rarity']} {emote}"
-        update.message.reply_photo(card['file_id'], caption=text)
+async def check_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /check <card_id>")
+        return
+    card_id = int(args[0])
+    card = get_card_by_id(card_id)
+    if not card:
+        await update.message.reply_text("Card not found!")
+        return
+    
+    rarity_name, rarity_percent, rarity_emoji = get_rarity_info(card['rarity'])
+    
+    msg = f"🎴 Card Info\n\nName: {card['name']}\nID: {card['id']}\nAnime: {card['anime']}\nRarity: {rarity_name} {rarity_emoji} ({rarity_percent}%)"
+    await update.message.reply_text(msg)
