@@ -1,22 +1,31 @@
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
-from commands.upload import upload_start, upload_anime, upload_character, upload_rarity, upload_photo
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+)
+from commands.start import start
+from commands.help import help_command
+from commands.upload import upload_command, upload_anime, upload_character, upload_rarity
 from commands.check import check_card
 
-app = Application.builder().token("BOT_TOKEN").build()
+# Token from environment
+import os
+TOKEN = os.getenv("BOT_TOKEN")
 
-from telegram.ext import ConversationHandler
-upload_conv = ConversationHandler(
-    entry_points=[CommandHandler('upload', upload_start)],
-    states={
-        ANIME: [CallbackQueryHandler(upload_anime, pattern="^anime_")],
-        CHARACTER: [CallbackQueryHandler(upload_character, pattern="^char_")],
-        RARITY: [CallbackQueryHandler(upload_rarity, pattern="^rar_")],
-        PHOTO: [MessageHandler(filters.PHOTO, upload_photo)]
-    },
-    fallbacks=[]
-)
+app = ApplicationBuilder().token(TOKEN).build()
 
-app.add_handler(upload_conv)
+# User Commands
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("help", help_command))
+app.add_handler(CommandHandler("upload", upload_command))
 app.add_handler(CommandHandler("check", check_card))
 
+# Upload Step Handlers
+ANIME = [CallbackQueryHandler(upload_anime, pattern="^anime_")]
+CHARACTER = [CallbackQueryHandler(upload_character, pattern="^character_")]
+RARITY = [CallbackQueryHandler(upload_rarity, pattern="^rarity_")]
+
+for h in ANIME + CHARACTER + RARITY:
+    app.add_handler(h)
+
+print("Bot is running...")
 app.run_polling()
