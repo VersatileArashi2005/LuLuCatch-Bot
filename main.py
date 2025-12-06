@@ -37,27 +37,28 @@ async def start_bot() -> None:
     
     print("LuLuCatch Bot is starting...")
 
-    # Webhook စနစ်ဖြင့် ပြင်ဆင်ခြင်း (Railway အတွက် အသင့်တော်ဆုံး)
+    # Webhook setup for Railway
     PORT = int(os.environ.get('PORT', '8080'))
-    WEBHOOK_URL = os.environ.get('WEBHOOK_URL') # Railway Variables မှာ သတ်မှတ်ရမယ့် URL
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
+    
+    # Standard Webhook Path
+    URL_PATH = "update"
 
     if WEBHOOK_URL is None:
         print("ERROR: WEBHOOK_URL environment variable is missing. Falling back to Polling.")
-        # Railway မှာ run ရင် Error ဖြစ်နိုင်ပေမယ့် Local Testing အတွက် Polling ကို ပြန်ပြောင်းပေးထားပါတယ်။
         await application.run_polling(poll_interval=3)
         return
 
-    # 1. Telegram ကို Webhook URL ပေးပို့ခြင်း
-    # Telegram ကို သူ့ဆီ လာပို့ရမယ့် လိပ်စာ (URL) ကို ပြောပြတာ
-    await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}")
+    # 1. Set Webhook URL to Telegram
+    await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{URL_PATH}") 
 
     print(f"LuLuCatch Bot is running with Webhooks on port {PORT}...")
 
-    # 2. Webhook Server ကို စတင်ခြင်း
+    # 2. Start the Webhook Server
     await application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path=TOKEN,
+        url_path=URL_PATH,
     )
 
 # The main execution block starts the async function
