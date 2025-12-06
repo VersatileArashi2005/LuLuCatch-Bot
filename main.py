@@ -3,7 +3,8 @@
 import os
 import asyncio
 from dotenv import load_dotenv
-from telegram.ext import Application, CommandHandler, ContextTypes, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update
 
 # Placeholder for database connection (Assuming database.py will handle the actual connection)
 async def init_db_connection():
