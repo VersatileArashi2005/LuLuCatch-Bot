@@ -1,6 +1,7 @@
 # main.py
 
 import os
+import asyncio # New: Need asyncio for running the async function
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -15,8 +16,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     await update.message.reply_text(f"Hello {user.first_name}! I am LuLuCatch Bot.")
 
-def main() -> None:
-    # Load environment variables (dotenv is primarily for local)
+# Function that contains all async operations, declared as async
+async def start_bot() -> None:
+    # Load environment variables
     load_dotenv()
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
@@ -24,24 +26,26 @@ def main() -> None:
         print("ERROR: TELEGRAM_BOT_TOKEN not found in environment variables.")
         return
 
-    # In an async environment, you need to run async functions within the loop
-    # For simplicity, we skip init_db_connection call here and assume the setup is simple.
+    # Call async database initialization (Needs await)
+    await init_db_connection()
     
+    # Initialize Application
     application = Application.builder().token(TOKEN).build()
     
+    # Add Handlers
     application.add_handler(CommandHandler("start", start_command))
     
     print("LuLuCatch Bot is running...")
     
-    # Use run_polling for simple setups, or run_webhook for better performance.
-    # We use run_forever() to let the system handle the loop for long running process
-    application.run_polling(poll_interval=3)
-
-if __name__ == "__main__":
-    main() # Call main function directly without asyncio.run()
-    
-    # We use Polling for simplicity here, but Webhooks are better for Railway
+    # Start polling using await
     await application.run_polling(poll_interval=3)
 
+# The main execution block starts the async function
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        # Calls the async start_bot function using asyncio
+        asyncio.run(start_bot())
+    except KeyboardInterrupt:
+        print("Bot shutting down...")
+    except Exception as e:
+        print(f"An error occurred: {e}")
