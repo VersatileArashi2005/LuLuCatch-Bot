@@ -378,7 +378,7 @@ application.add_handler(CommandHandler("info", info_cmd))
 
 # message handlers
 application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, private_photo_handler))
-application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND) & filters.ChatType.ALL, group_message_handler))
+application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), group_message_handler))
 
 # webhook receiver
 @app.post("/webhook")
@@ -412,3 +412,4 @@ async def on_shutdown():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
+
