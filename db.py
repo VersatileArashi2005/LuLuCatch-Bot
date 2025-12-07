@@ -45,7 +45,7 @@ def init_db():
         );
         """)
         
-        # cards table (without uploader_telegram_id first)
+        # cards table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS cards (
             id SERIAL PRIMARY KEY,
@@ -55,18 +55,35 @@ def init_db():
             file_id TEXT NOT NULL
         );
         """)
-        
-        # add uploader_telegram_id column if not exists
-        cur.execute("""
-        ALTER TABLE cards
-        ADD COLUMN IF NOT EXISTS uploader_telegram_id BIGINT REFERENCES users(telegram_id);
-        """)
-        
+
+        # add uploader_telegram_id column safely
+        try:
+            cur.execute("""
+            ALTER TABLE cards
+            ADD COLUMN uploader_telegram_id BIGINT;
+            """)
+        except psycopg2.errors.DuplicateColumn:
+            pass  # column already exists
+
+        # add foreign key if users.telegram_id exists
+        try:
+            cur.execute("""
+            ALTER TABLE cards
+            ADD CONSTRAINT fk_uploader FOREIGN KEY (uploader_telegram_id) REFERENCES users(telegram_id);
+            """)
+        except psycopg2.errors.DuplicateObject:
+            pass  # constraint already exists
+        except psycopg2.errors.UndefinedColumn:
+            pass  # users.telegram_id doesn't exist yet
+
         # create index if not exists
-        cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_telegram_id);
-        """)
-        
+        try:
+            cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_telegram_id);
+            """)
+        except Exception:
+            pass
+
         conn.commit()
 
 # =========================
