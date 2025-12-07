@@ -21,14 +21,10 @@ def get_conn():
 
 
 def init_db():
-    """
-    Safe migration-style init: create tables if not exists.
-    Matches the schema you specified.
-    """
+    """Safe migration-style init: create tables if not exists."""
     with get_conn() as conn:
         cur = conn.cursor()
 
-        # users table (use user_id as Telegram ID)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -38,7 +34,6 @@ def init_db():
         );
         """)
 
-        # user_cards (inventory)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS user_cards (
             id SERIAL PRIMARY KEY,
@@ -46,9 +41,8 @@ def init_db():
             card_id INT NOT NULL REFERENCES cards(id) DEFERRABLE INITIALLY DEFERRED,
             quantity INT DEFAULT 1
         );
-        """)  # Note: cards table may be created later, but REF handles it via deferred constraint
+        """)
 
-        # groups
         cur.execute("""
         CREATE TABLE IF NOT EXISTS groups (
             chat_id BIGINT PRIMARY KEY,
@@ -56,7 +50,6 @@ def init_db():
         );
         """)
 
-        # chat_stats
         cur.execute("""
         CREATE TABLE IF NOT EXISTS chat_stats (
             chat_id BIGINT PRIMARY KEY,
@@ -64,7 +57,6 @@ def init_db():
         );
         """)
 
-        # cards table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS cards (
             id SERIAL PRIMARY KEY,
@@ -76,7 +68,6 @@ def init_db():
         );
         """)
 
-        # active_drops
         cur.execute("""
         CREATE TABLE IF NOT EXISTS active_drops (
             chat_id BIGINT NOT NULL,
@@ -142,7 +133,6 @@ def give_card_to_user(user_id, card_id, qty=1):
     """Add card to user's inventory (user_cards). If existing, increment quantity."""
     with get_conn() as conn:
         cur = conn.cursor()
-        # check existing
         cur.execute("SELECT id, quantity FROM user_cards WHERE user_id=%s AND card_id=%s", (user_id, card_id))
         r = cur.fetchone()
         if r:
@@ -176,3 +166,45 @@ def get_user_cards(user_id):
             WHERE uc.user_id = %s
         """, (user_id,))
         return cur.fetchall()
+
+
+# ----------------------------
+# New functions for /edit & /delete
+# ----------------------------
+
+def update_card(card_id, anime=None, character=None, rarity=None, file_id=None):
+    """
+    Update card info. Only fields provided (non-None) are updated.
+    """
+    if all(v is None for v in [anime, character, rarity, file_id]):
+        return  # nothing to do
+    with get_conn() as conn:
+        cur = conn.cursor()
+        fields = []
+        values = []
+        if anime is not None:
+            fields.append("anime=%s")
+            values.append(anime)
+        if character is not None:
+            fields.append("character=%s")
+            values.append(character)
+        if rarity is not None:
+            fields.append("rarity=%s")
+            values.append(rarity)
+        if file_id is not None:
+            fields.append("file_id=%s")
+            values.append(file_id)
+        values.append(card_id)
+        sql = f"UPDATE cards SET {', '.join(fields)} WHERE id=%s"
+        cur.execute(sql, values)
+        conn.commit()
+
+
+def delete_card(card_id):
+    """Delete card and remove it from all inventories & drops"""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM user_cards WHERE card_id=%s", (card_id,))
+        cur.execute("DELETE FROM active_drops WHERE card_id=%s", (card_id,))
+        cur.execute("DELETE FROM cards WHERE id=%s", (card_id,))
+        conn.commit()
