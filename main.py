@@ -1,37 +1,72 @@
 # main.py
+import os
+import uvicorn
+from fastapi import FastAPI, Request
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackContext
+from telegram.ext import Application
+from config import BOT_TOKEN, WEBHOOK_URL, PORT
+import db
+
+# imports from commands
 from commands.start import start
-from commands.help import help_command
-from commands.profile import profile
-from commands.catch import catch
-from commands.harem import harem
-from commands.trade import trade
-from commands.smash import smash
-from commands.setfav import setfav
-from commands.admin import admin_commands
-from commands.upload import upload_handlers
-from commands.check import check_card
+from commands.info import info_cmd
+from commands.check import check_cmd
+from commands.upload import register_handlers as register_upload_handlers
+from commands.admin import register_admin_handlers
 
-TOKEN = "YOUR_BOT_TOKEN"
+# helpers
+from db import init_db, register_group, ensure_user
 
-app = ApplicationBuilder().token(TOKEN).build()
+app = FastAPI()
 
-# User Commands
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("help", help_command))
-app.add_handler(CommandHandler("profile", profile))
-app.add_handler(CommandHandler("catch", catch))
-app.add_handler(CommandHandler("harem", harem))
-app.add_handler(CommandHandler("trade", trade))
-app.add_handler(CommandHandler("smash", smash))
-app.add_handler(CommandHandler("setfav", setfav))
-app.add_handler(CommandHandler("check", check_card))
+# Initialize bot application
+application = Application.builder().token(BOT_TOKEN).build()
 
-# Admin / Owner Commands
-admin_commands(app)
+# Register command handlers
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("info", info_cmd))
+application.add_handler(CommandHandler("check", check_cmd))
 
-# Upload handlers (Step 1-3)
-upload_handlers(app)
+# Register upload & admin handlers (they register multiple handlers)
+register_upload_handlers(application)
+register_admin_handlers(application)
 
-app.run_polling()
+# simple group message listener to register groups automatically
+from telegram.ext import MessageHandler, filters
+
+async def group_message_listener(update, context):
+    chat = update.effective_chat
+    if chat.type in ("group", "supergroup"):
+        # register group to groups table
+        register_group(chat.id, chat.title)
+
+application.add_handler(MessageHandler(filters.ALL & filters.ChatType.GROUPS, group_message_listener))
+
+# Webhook receiver
+@app.post("/webhook")
+async def webhook_receiver(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return {"ok": True}
+
+# Startup/shutdown events
+@app.on_event("startup")
+async def on_startup():
+    print("Starting up... init db and bot")
+    init_db()
+    await application.initialize()
+    if WEBHOOK_URL:
+        # set webhook to WEBHOOK_URL + /webhook
+        await application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+    await application.start()
+    print("Bot started.")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    print("Shutting down bot...")
+    await application.stop()
+    await application.shutdown()
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT)
