@@ -2,9 +2,6 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
 
-# =========================
-# Postgres connection from Railway env
-# =========================
 DB_HOST = os.environ.get("PGHOST")
 DB_PORT = os.environ.get("PGPORT", 5432)
 DB_NAME = os.environ.get("PGDATABASE")
@@ -21,14 +18,9 @@ def get_conn():
         cursor_factory=RealDictCursor
     )
 
-# =========================
-# Initialize tables if not exists (safe migration)
-# =========================
 def init_db():
     with get_conn() as conn:
         cur = conn.cursor()
-        
-        # users table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -37,16 +29,12 @@ def init_db():
             last_catch TEXT
         );
         """)
-        
-        # groups table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS groups (
             chat_id BIGINT PRIMARY KEY,
             title TEXT
         );
         """)
-        
-        # cards table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS cards (
             id SERIAL PRIMARY KEY,
@@ -57,17 +45,11 @@ def init_db():
             uploader_user_id BIGINT REFERENCES users(user_id)
         );
         """)
-        
-        # create index if not exists
         cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_user_id);
         """)
-
         conn.commit()
 
-# =========================
-# Ensure user exists in DB
-# =========================
 def ensure_user(user_id, first_name):
     with get_conn() as conn:
         cur = conn.cursor()
@@ -78,18 +60,12 @@ def ensure_user(user_id, first_name):
         """, (user_id, first_name))
         conn.commit()
 
-# =========================
-# Get user by user_id
-# =========================
 def get_user_by_id(user_id):
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
         return cur.fetchone()
 
-# =========================
-# Register group
-# =========================
 def register_group(chat_id, title):
     with get_conn() as conn:
         cur = conn.cursor()
@@ -100,9 +76,6 @@ def register_group(chat_id, title):
         """, (chat_id, title))
         conn.commit()
 
-# =========================
-# Add card
-# =========================
 def add_card(name, anime, rarity, file_id, uploader_user_id=None):
     with get_conn() as conn:
         cur = conn.cursor()
@@ -115,18 +88,12 @@ def add_card(name, anime, rarity, file_id, uploader_user_id=None):
         conn.commit()
         return card_id
 
-# =========================
-# Get all registered groups
-# =========================
 def get_all_groups():
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("SELECT chat_id FROM groups")
         return [r['chat_id'] for r in cur.fetchall()]
 
-# =========================
-# Get card by ID
-# =========================
 def get_card_by_id(card_id):
     with get_conn() as conn:
         cur = conn.cursor()
