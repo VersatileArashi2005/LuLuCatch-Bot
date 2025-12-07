@@ -1,30 +1,24 @@
-# check.py
+# commands/check.py
 from telegram import Update
-from telegram.ext import CommandHandler, CallbackContext
-from db import get_card
+from telegram.ext import ContextTypes
+from db import get_card_by_id
+from commands.utils import rarity_to_text
 
-RARITY_EMOTE = {
-    1: "🥉",
-    2: "🥈",
-    3: "🔹",
-    4: "💥",
-    5: "💎",
-    6: "💚",
-    7: "💎",
-    8: "🌟",
-    9: "🏆",
-    10: "👑",
-}
-
-def check_card(update: Update, context: CallbackContext):
-    if len(context.args) != 1:
-        update.message.reply_text("Usage: /check <card_id>")
+async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /check <card_id>")
         return
-    card_id = int(context.args[0])
-    card = get_card(card_id)
+    card_id = int(args[0])
+    card = get_card_by_id(card_id)
     if not card:
-        update.message.reply_text("Card not found!")
+        await update.message.reply_text("Card not found.")
         return
-    # card fields: id, name, anime, character, rarity
-    text = f"Name: {card[1]}\nID: {card[0]}\nAnime: {card[2]}\nCharacter: {card[3]}\nRarity: {RARITY_EMOTE[card[4]]}"
-    update.message.reply_photo(photo="https://via.placeholder.com/200", caption=text)
+    name = card['name']
+    anime = card['anime']
+    rarity_id = card['rarity']
+    file_id = card['file_id']
+    rarity_name, percent, emoji = rarity_to_text(rarity_id)
+    caption = f"{emoji} {name}\n📌 ID: {card_id}\n🎬 Anime: {anime}\n🏷 Rarity: {rarity_name.capitalize()} ({percent}%)"
+    # file_id is Telegram file_id stored earlier; send_photo works for both file_id or URL
+    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=file_id, caption=caption)
