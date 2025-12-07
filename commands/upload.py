@@ -1,63 +1,94 @@
-# upload.py
+# commands/upload.py
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CommandHandler, CallbackQueryHandler, CallbackContext
-from db import add_card
+from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters
+from db import add_card, ensure_user, give_card_to_user, register_group, get_all_groups
+from commands.utils import rarity_to_text
+import re
 
-RARITY = {
-    1: ("bronze", "100%", "🥉"),
-    2: ("silver", "90%", "🥈"),
-    3: ("rare", "80%", "🔹"),
-    4: ("epic", "70%", "💥"),
-    5: ("platinum", "40%", "💎"),
-    6: ("emerald", "30%", "💚"),
-    7: ("diamond", "10%", "💎"),
-    8: ("mythical", "5%", "🌟"),
-    9: ("legendary", "2%", "🏆"),
-    10: ("supernatural", "1%", "👑"),
-}
+# in-memory pending uploads: user_id -> {"name":..., "anime":..., "rarity":int}
+pending_uploads = {}
 
-user_upload_state = {}  # temp storage: {user_id: {"anime": "", "character": "", "rarity": 0}}
+async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user.id, user.first_name or user.username or "User")
 
-def upload(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    keyboard = [[InlineKeyboardButton("Add Anime Name", callback_data="anime_add")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("Step 1: Please choose Anime Name", reply_markup=reply_markup)
-    user_upload_state[user_id] = {}
+    text = update.message.text or ""
+    # Expect format: /upload Name|Anime
+    parts = text.split(" ", 1)
+    if len(parts) < 2:
+        await update.message.reply_text("Usage: /upload <Name>|<Anime>\nExample: /upload Nami|One Piece\nAfter this I will ask you to send the image.")
+        return
 
-def upload_anime(update: Update, context: CallbackContext):
+    payload = parts[1].strip()
+    if "|" not in payload:
+        await update.message.reply_text("Please separate Name and Anime with a pipe '|' character. Example: /upload Nami|One Piece")
+        return
+
+    name, anime = [p.strip() for p in payload.split("|", 1)]
+    # Set default rarity prompt (user will be asked to choose rarity after image)
+    pending_uploads[user.id] = {"name": name, "anime": anime, "rarity": None}
+    await update.message.reply_text("Got it. Please send the card image now (in this chat or in bot DM). After image, I'll ask you to choose rarity.")
+
+# photo handler to finalize upload
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id not in pending_uploads:
+        # Not an upload flow: ignore or inform
+        return
+
+    if not update.message.photo:
+        await update.message.reply_text("Please send a photo (image).")
+        return
+
+    file_id = update.message.photo[-1].file_id  # highest res
+    data = pending_uploads[user.id]
+    # temporarily store file_id, ask for rarity
+    data['file_id'] = file_id
+
+    # Show rarity buttons
+    keyboard = []
+    for rid in range(1, 11):
+        name, pct, emoji = rarity_to_text(rid)
+        keyboard.append([InlineKeyboardButton(f"{emoji} {name.capitalize()} ({pct}%)", callback_data=f"upload_rarity_{rid}")])
+    await update.message.reply_text("Choose rarity for this card:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# callback for rarity selection
+async def upload_rarity_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user_id = query.from_user.id
-    # store anime name
-    user_upload_state[user_id]["anime"] = query.data.replace("anime_", "")
-    query.answer()
-    query.edit_message_text(text="Step 2: Please enter Character Name")
+    await query.answer()
+    user = query.from_user
+    m = re.match(r"upload_rarity_(\d+)", query.data)
+    if not m:
+        await query.edit_message_text("Invalid selection.")
+        return
+    rid = int(m.group(1))
+    if user.id not in pending_uploads:
+        await query.edit_message_text("Upload session expired or not found. Start /upload again.")
+        return
+    info = pending_uploads.pop(user.id)
+    info['rarity'] = rid
+    # persist to DB
+    card_id = add_card(info['name'], info['anime'], info['rarity'], info['file_id'], user.id)
+    # auto-give uploader the card
+    give_card_to_user(user.id, card_id)
 
-def upload_character(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    character_name = update.message.text
-    user_upload_state[user_id]["character"] = character_name
-    # show Rarity buttons
-    keyboard = [
-        [InlineKeyboardButton(f"{v[2]} {v[0]} ({v[1]})", callback_data=f"rarity_{k}") ] for k,v in RARITY.items()
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("Step 3: Choose Rarity", reply_markup=reply_markup)
+    # Notify uploader
+    name, pct, emoji = rarity_to_text(rid)
+    await query.edit_message_text(f"✅ Uploaded card id {card_id}\n{name.capitalize()} {emoji} ({pct}%)\nAnime: {info['anime']}\nName: {info['name']}")
 
-def upload_rarity(update: Update, context: CallbackContext):
-    query = update.callback_query
-    user_id = query.from_user.id
-    rarity_id = int(query.data.replace("rarity_", ""))
-    user_upload_state[user_id]["rarity"] = rarity_id
-    # finalize upload
-    data = user_upload_state[user_id]
-    add_card(name="TempCard", anime=data["anime"], character=data["character"], rarity=data["rarity"])
-    query.answer()
-    query.edit_message_text(text=f"Upload complete!\nAnime: {data['anime']}\nCharacter: {data['character']}\nRarity: {RARITY[rarity_id][0]}")
-    del user_upload_state[user_id]
+    # Notify all registered groups
+    groups = get_all_groups()
+    caption = f"🎴 New card uploaded!\n{emoji} {info['name']}\n📌 ID: {card_id}\n🎬 Anime: {info['anime']}\n🏷 Rarity: {name.capitalize()} ({pct}%)\nTry to claim it in chat!"
+    for chat_id in groups:
+        try:
+            await context.bot.send_photo(chat_id=chat_id, photo=info['file_id'], caption=caption)
+        except Exception:
+            # ignore per-chat send errors
+            pass
 
-def upload_handlers(app):
-    app.add_handler(CommandHandler("upload", upload))
-    app.add_handler(CallbackQueryHandler(upload_anime, pattern="^anime_"))
-    app.add_handler(MessageHandler(Filters.text & ~Filters.command, upload_character))
-    app.add_handler(CallbackQueryHandler(upload_rarity, pattern="^rarity_"))
+# Export function to register handlers from main
+def register_handlers(application):
+    application.add_handler(CommandHandler("upload", upload_cmd))
+    # photos in any chat (private or group) - we only act if user has pending upload
+    application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, photo_handler))
+    application.add_handler(CallbackQueryHandler(upload_rarity_cb, pattern=r"^upload_rarity_\d+$"))
