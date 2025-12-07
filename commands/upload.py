@@ -1,291 +1,419 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ContextTypes,
-    CallbackQueryHandler,
-    MessageHandler,
-    CommandHandler,
-    filters,
+ContextTypes,
+CallbackQueryHandler,
+MessageHandler,
+CommandHandler,
+filters,
 )
 from urllib.parse import quote_plus, unquote_plus
 import re
 
 from db import (
-    add_card,
-    ensure_user,
-    give_card_to_user,
-    get_all_groups,
-    get_user_by_id,
-    get_conn,
-    update_card,
-    delete_card,
-    get_card_by_id
+add_card,
+ensure_user,
+give_card_to_user,
+get_all_groups,
+get_user_by_id,
+get_conn,
+update_card,
+delete_card
 )
 from commands.utils import rarity_to_text
 
-# -------------------------
-# Global storage for pending uploads/edits
-# -------------------------
+Upload sessions kept here
+
 pending_uploads = {}
+
+-------------------------
+
+DB Query Helpers
+
+-------------------------
+
+import psycopg2.extras
+
+def db_list_animes():
+with get_conn() as conn:
+cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+cur.execute("SELECT anime FROM cards WHERE anime IS NOT NULL GROUP BY anime ORDER BY LOWER(anime)")
+return [r['anime'] for r in cur.fetchall()]
+
+def db_list_characters(anime):
+with get_conn() as conn:
+cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+cur.execute(
+"SELECT character FROM cards WHERE anime=%s GROUP BY character ORDER BY LOWER(character)",
+(anime,)
+)
+return [r['character'] for r in cur.fetchall()]
 
 ALLOWED_ROLES = {"owner", "dev", "admin", "uploader"}
 ADMIN_ROLES = {"owner", "dev", "admin"}
 
-# -------------------------
-# DB Query Helpers
-# -------------------------
-import psycopg2.extras
+-------------------------
 
-def db_list_animes():
-    with get_conn() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT anime FROM cards WHERE anime IS NOT NULL GROUP BY anime ORDER BY LOWER(anime)")
-        return [r['anime'] for r in cur.fetchall()]
+/upload  — DM ONLY
 
-def db_list_characters(anime):
-    with get_conn() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
-            "SELECT character FROM cards WHERE anime=%s GROUP BY character ORDER BY LOWER(character)",
-            (anime,)
-        )
-        return [r['character'] for r in cur.fetchall()]
+-------------------------
 
-# -------------------------
-# /upload  — DM ONLY
-# -------------------------
 async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    user = update.effective_user
+chat = update.effective_chat
+user = update.effective_user
 
-    if not chat or chat.type != "private":
-        await update.message.reply_text(
-            "❌ /upload can only be used in **private chat**.\n"
-            "➡ Please DM the bot to upload cards."
-        )
-        return
+if not chat or chat.type != "private":  
+    await update.message.reply_text(  
+        "❌ /upload can only be used in **private chat**.\n"  
+        "➡ Please DM the bot to upload cards."  
+    )  
+    return  
 
-    ensure_user(user.id, user.first_name or user.username or "User")
-    u = get_user_by_id(user.id)
-    role = (u.get("role") or "user").lower()
+ensure_user(user.id, user.first_name or user.username or "User")  
+u = get_user_by_id(user.id)  
+role = (u.get("role") or "user").lower()  
 
-    if role not in ALLOWED_ROLES:
-        await update.message.reply_text(
-            "❌ You do not have permission to upload.\n"
-            "Required role: owner / dev / admin / uploader."
-        )
-        return
+if role not in ALLOWED_ROLES:  
+    await update.message.reply_text(  
+        "❌ You do not have permission to upload.\n"  
+        "Required role: owner / dev / admin / uploader."  
+    )  
+    return  
 
-    animes = db_list_animes()
-    keyboard = [[InlineKeyboardButton(a, callback_data=f"upload_choose_anime::{quote_plus(a)}")] for a in animes]
-    keyboard.append([InlineKeyboardButton("➕ Add new anime", callback_data="upload_add_anime")])
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")])
+animes = db_list_animes()  
+keyboard = [[InlineKeyboardButton(a, callback_data=f"upload_choose_anime::{quote_plus(a)}")] for a in animes]  
+keyboard.append([InlineKeyboardButton("➕ Add new anime", callback_data="upload_add_anime")])  
+keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")])  
 
-    pending_uploads[user.id] = {"stage": "anime_select"}
+pending_uploads[user.id] = {"stage": "anime_select"}  
 
-    await update.message.reply_text(
-        "🎬 **Select Anime**\nOr choose *Add new anime* if it's missing.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+await update.message.reply_text(  
+    "🎬 **Select Anime**\nOr choose *Add new anime* if it's missing.",  
+    reply_markup=InlineKeyboardMarkup(keyboard),  
+    parse_mode="Markdown"  
+)
 
-# -------------------------
-# /edit  — DM ONLY
-# -------------------------
-async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    u = get_user_by_id(user.id)
-    role = (u.get("role") or "user").lower()
+-------------------------
 
-    if role not in ADMIN_ROLES:
-        await update.message.reply_text("❌ You do not have permission to edit cards.")
-        return
+Inline Button Callback Router
 
-    args = context.args
-    if len(args) < 3:
-        await update.message.reply_text("Usage: /edit <card_id> <field> <new_value>")
-        return
+-------------------------
 
-    card_id = int(args[0])
-    field = args[1].lower()
-    new_value = " ".join(args[2:])
-
-    if field not in ["anime", "character", "rarity", "file_id"]:
-        await update.message.reply_text("❌ Invalid field. Must be one of: anime, character, rarity, file_id")
-        return
-
-    try:
-        if field == "rarity":
-            new_value = int(new_value)
-        update_card(card_id, **{field: new_value})
-        await update.message.reply_text(f"✅ Card {card_id} updated: {field} = {new_value}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-
-# -------------------------
-# Inline Callback Router
-# -------------------------
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-    data = query.data or ""
-    st = pending_uploads.get(user.id)
+query = update.callback_query
+await query.answer()
+user = query.from_user
+data = query.data or ""
+st = pending_uploads.get(user.id)
 
-    # Upload callbacks
-    if data.startswith("upload_"):
-        # Cancel
-        if data == "upload_cancel":
-            pending_uploads.pop(user.id, None)
-            await query.edit_message_text("❌ Operation cancelled.")
-            return
+# Cancel  
+if data == "upload_cancel":  
+    pending_uploads.pop(user.id, None)  
+    await query.edit_message_text("❌ Operation cancelled.")  
+    return  
 
-        # Add new anime
-        if data == "upload_add_anime":
-            pending_uploads[user.id] = {"stage": "adding_anime"}
-            await query.edit_message_text("✏️ Send the new anime name.")
-            return
+# Add new anime  
+if data == "upload_add_anime":  
+    pending_uploads[user.id] = {"stage": "adding_anime"}  
+    await query.edit_message_text("✏️ Send the new anime name.")  
+    return  
 
-        # Choose anime
-        m = re.match(r"^upload_choose_anime::(.+)$", data)
-        if m:
-            anime = unquote_plus(m.group(1))
-            pending_uploads[user.id] = {"stage": "character_select", "anime": anime}
+# Choose anime  
+m = re.match(r"^upload_choose_anime::(.+)$", data)  
+if m:  
+    anime = unquote_plus(m.group(1))  
+    pending_uploads[user.id] = {"stage": "character_select", "anime": anime}  
 
-            chars = db_list_characters(anime)
-            keyboard = [[InlineKeyboardButton(c, callback_data=f"upload_choose_character::{quote_plus(c)}")] for c in chars]
-            keyboard.append([InlineKeyboardButton("➕ Add new character", callback_data="upload_add_character")])
-            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="upload_back_anime")])
-            keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")])
+    chars = db_list_characters(anime)  
+    keyboard = [[InlineKeyboardButton(c, callback_data=f"upload_choose_character::{quote_plus(c)}")] for c in chars]  
+    keyboard.append([InlineKeyboardButton("➕ Add new character", callback_data="upload_add_character")])  
+    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="upload_back_anime")])  
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")])  
 
-            await query.edit_message_text(
-                f"🎬 Anime: *{anime}*\n\nSelect Character:",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
-            return
+    await query.edit_message_text(  
+        f"🎬 Anime: *{anime}*\n\nSelect Character:",  
+        reply_markup=InlineKeyboardMarkup(keyboard),  
+        parse_mode="Markdown"  
+    )  
+    return  
 
-        # Other upload callbacks like add character, back, rarity selection etc...
-        # (reuse existing logic from your current upload.py)
+# Add character  
+if data == "upload_add_character":  
+    if not st or "anime" not in st:  
+        await query.edit_message_text("⚠️ Error: please select an anime first.")  
+        return  
+    st["stage"] = "adding_character"  
+    await query.edit_message_text("✏️ Send character name.")  
+    return  
 
-# -------------------------
-# DM Text Handler (for uploads and edits)
-# -------------------------
+# Back to anime  
+if data == "upload_back_anime":  
+    animes = db_list_animes()  
+    keyboard = [[InlineKeyboardButton(a, callback_data=f"upload_choose_anime::{quote_plus(a)}")] for a in animes]  
+    keyboard.append([InlineKeyboardButton("➕ Add new anime", callback_data="upload_add_anime")])  
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")])  
+
+    pending_uploads[user.id] = {"stage": "anime_select"}  
+
+    await query.edit_message_text(  
+        "🎬 Select Anime:",  
+        reply_markup=InlineKeyboardMarkup(keyboard)  
+    )  
+    return  
+
+# Character selection  
+m = re.match(r"^upload_choose_character::(.+)$", data)  
+if m:  
+    char = unquote_plus(m.group(1))  
+    st.update({"stage": "rarity_select", "character": char})  
+    pending_uploads[user.id] = st  
+
+    keyboard = [  
+        [  
+            InlineKeyboardButton(  
+                f"{rarity_to_text(rid)[2]} {rarity_to_text(rid)[0].capitalize()} ({rarity_to_text(rid)[1]}%)",  
+                callback_data=f"upload_rarity::{rid}"  
+            )  
+        ] for rid in range(1, 11)  
+    ]  
+    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="upload_back_char")])  
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")])  
+
+    await query.edit_message_text(  
+        f"🎭 Character: *{char}*\n\nSelect rarity:",  
+        reply_markup=InlineKeyboardMarkup(keyboard),  
+        parse_mode="Markdown"  
+    )  
+    return  
+
+# Back to characters  
+if data == "upload_back_char":  
+    anime = st.get("anime")  
+    chars = db_list_characters(anime)  
+
+    keyboard = [[InlineKeyboardButton(c, callback_data=f"upload_choose_character::{quote_plus(c)}")] for c in chars]  
+    keyboard.append([InlineKeyboardButton("➕ Add new character", callback_data="upload_add_character")])  
+    keyboard.append([InlineKeyboardButton("⬅️ Back to anime", callback_data="upload_back_anime")])  
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")])  
+
+    st["stage"] = "character_select"  
+
+    await query.edit_message_text(  
+        "Select Character:",  
+        reply_markup=InlineKeyboardMarkup(keyboard)  
+    )  
+    return  
+
+# Rarity chosen  
+m = re.match(r"^upload_rarity::(\d+)$", data)  
+if m:  
+    rid = int(m.group(1))  
+    st["rarity"] = rid  
+    st["stage"] = "awaiting_photo"  
+    pending_uploads[user.id] = st  
+
+    await query.edit_message_text(  
+        "📷 Please send the **card image** now.",  
+        parse_mode="Markdown"  
+    )  
+    return
+
+-------------------------
+
+Text Handler (DM-only)
+
+-------------------------
+
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    chat = update.effective_chat
-    if chat.type != "private":
-        return
+user = update.effective_user
+chat = update.effective_chat
 
-    st = pending_uploads.get(user.id)
-    if not st:
-        return
+if chat.type != "private":  
+    return  
 
-    text = update.message.text.strip()
+st = pending_uploads.get(user.id)  
+if not st:  
+    return  
 
-    # Edit stage
-    if st.get("stage") == "awaiting_new_value":
-        card_id = st["edit_card_id"]
-        field = st["edit_field"]
-        try:
-            update_card(card_id, **{field: text})
-            await update.message.reply_text(f"✅ Card {card_id} updated: {field} = {text}")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error: {e}")
-        pending_uploads.pop(user.id, None)
-        return
+text = update.message.text.strip()  
 
-    # Upload stages...
-    # (reuse existing logic)
+# Add anime name  
+if st["stage"] == "adding_anime":  
+    anime = text  
+    pending_uploads[user.id] = {"stage": "character_select", "anime": anime}  
 
-# -------------------------
-# Photo handler (DM-only)
-# -------------------------
+    chars = db_list_characters(anime)  
+    keyboard = [[InlineKeyboardButton(c, callback_data=f"upload_choose_character::{quote_plus(c)}")] for c in chars]  
+    keyboard.append([InlineKeyboardButton("➕ Add new character", callback_data="upload_add_character")])  
+    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="upload_back_anime")])  
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")])  
+
+    await update.message.reply_text(  
+        f"🎬 Anime set to *{anime}*.\nSelect character:",  
+        reply_markup=InlineKeyboardMarkup(keyboard),  
+        parse_mode="Markdown"  
+    )  
+    return  
+
+# Add character name  
+if st["stage"] == "adding_character":  
+    st["character"] = text  
+    st["stage"] = "rarity_select"  
+
+    keyboard = [  
+        [  
+            InlineKeyboardButton(  
+                f"{rarity_to_text(rid)[2]} {rarity_to_text(rid)[0].capitalize()} ({rarity_to_text(rid)[1]}%)",  
+                callback_data=f"upload_rarity::{rid}"  
+            )  
+        ] for rid in range(1, 11)  
+    ]  
+    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="upload_back_char")])  
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")])  
+
+    await update.message.reply_text(  
+        f"Character set to *{text}*. Select rarity:",  
+        reply_markup=InlineKeyboardMarkup(keyboard),  
+        parse_mode="Markdown"  
+    )  
+    return  
+
+await update.message.reply_text("⚠️ Please use the buttons — text is not required for this step.")
+
+-------------------------
+
+Photo Handler (DM-only)
+
+-------------------------
+
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    chat = update.effective_chat
-    if chat.type != "private":
-        return
+user = update.effective_user
+chat = update.effective_chat
 
-    st = pending_uploads.get(user.id)
-    if not st or st.get("stage") != "awaiting_photo":
-        return
+if chat.type != "private":  
+    return  
 
-    if not update.message.photo:
-        await update.message.reply_text("❌ Please send a **photo**.")
-        return
+st = pending_uploads.get(user.id)  
+if not st or st["stage"] != "awaiting_photo":  
+    return  
 
-    file_id = update.message.photo[-1].file_id
-    anime = st["anime"]
-    character = st["character"]
-    rarity = st["rarity"]
+if not update.message.photo:  
+    await update.message.reply_text("❌ Please send a **photo**.")  
+    return  
 
-    try:
-        card_id = add_card(anime, character, rarity, file_id, user.id)
-        give_card_to_user(user.id, card_id)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Database Error: {e}")
-        pending_uploads.pop(user.id, None)
-        return
+file_id = update.message.photo[-1].file_id  
 
-    name, pct, emoji = rarity_to_text(rarity)
-    await update.message.reply_text(
-        f"✅ **Card Uploaded Successfully!**\n"
-        f"🎴 ID: {card_id}\n"
-        f"{emoji} {character}\n"
-        f"🎬 {anime}\n"
-        f"🏷 {name.capitalize()} ({pct}%)",
-        parse_mode="Markdown"
-    )
+anime = st["anime"]  
+character = st["character"]  
+rarity = st["rarity"]  
 
-    caption = (
-        f"🎴 **New Card!**\n"
-        f"{emoji} {character}\n"
-        f"📌 ID: {card_id}\n"
-        f"🎬 Anime: {anime}\n"
-        f"🏷 Rarity: {name.capitalize()} ({pct}%)\n"
-        f"➡ Try to claim it!"
-    )
+try:  
+    card_id = add_card(anime, character, rarity, file_id, user.id)  
+    give_card_to_user(user.id, card_id)  
+except Exception as e:  
+    await update.message.reply_text(f"❌ Database Error: {e}")  
+    pending_uploads.pop(user.id, None)  
+    return  
 
-    for gid in get_all_groups():
-        try:
-            await context.bot.send_photo(chat_id=gid, photo=file_id, caption=caption)
-        except:
-            pass
+name, pct, emoji = rarity_to_text(rarity)  
 
-    pending_uploads.pop(user.id, None)
+await update.message.reply_text(  
+    f"✅ **Card Uploaded Successfully!**\n"  
+    f"🎴 ID: {card_id}\n"  
+    f"{emoji} {character}\n"  
+    f"🎬 {anime}\n"  
+    f"🏷 {name.capitalize()} ({pct}%)",  
+    parse_mode="Markdown"  
+)  
 
-# -------------------------
-# /delete Command
-# -------------------------
+caption = (  
+    f"🎴 **New Card!**\n"  
+    f"{emoji} {character}\n"  
+    f"📌 ID: {card_id}\n"  
+    f"🎬 Anime: {anime}\n"  
+    f"🏷 Rarity: {name.capitalize()} ({pct}%)\n"  
+    f"➡ Try to claim it!"  
+)  
+
+for gid in get_all_groups():  
+    try:  
+        await context.bot.send_photo(chat_id=gid, photo=file_id, caption=caption)  
+    except:  
+        pass  
+
+pending_uploads.pop(user.id, None)
+
+-------------------------
+
+/edit Command (Admin Only)
+
+-------------------------
+
+async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+user = update.effective_user
+u = get_user_by_id(user.id)
+role = (u.get("role") or "user").lower()
+
+if role not in ADMIN_ROLES:  
+    await update.message.reply_text("❌ You do not have permission to edit cards.")  
+    return  
+
+args = context.args  
+if not args:  
+    await update.message.reply_text("Usage: /edit <card_id> <field> <new_value>")  
+    return  
+
+card_id = args[0]  
+field = args[1] if len(args) > 1 else None  
+new_value = " ".join(args[2:]) if len(args) > 2 else None  
+
+if not field or not new_value:  
+    await update.message.reply_text("❌ Missing field or value.")  
+    return  
+
+try:  
+    update_card(card_id, field, new_value)  
+    await update.message.reply_text(f"✅ Card {card_id} updated: {field} = {new_value}")  
+except Exception as e:  
+    await update.message.reply_text(f"❌ Error: {e}")
+
+-------------------------
+
+/delete Command (Admin Only)
+
+-------------------------
+
 async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    u = get_user_by_id(user.id)
-    role = (u.get("role") or "user").lower()
+user = update.effective_user
+u = get_user_by_id(user.id)
+role = (u.get("role") or "user").lower()
 
-    if role not in ADMIN_ROLES:
-        await update.message.reply_text("❌ You do not have permission to delete cards.")
-        return
+if role not in ADMIN_ROLES:  
+    await update.message.reply_text("❌ You do not have permission to delete cards.")  
+    return  
 
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /delete <card_id>")
-        return
+args = context.args  
+if not args:  
+    await update.message.reply_text("Usage: /delete <card_id>")  
+    return  
 
-    card_id = args[0]
+card_id = args[0]  
 
-    try:
-        delete_card(card_id)
-        await update.message.reply_text(f"✅ Card {card_id} deleted.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
+try:  
+    delete_card(card_id)  
+    await update.message.reply_text(f"✅ Card {card_id} deleted.")  
+except Exception as e:  
+    await update.message.reply_text(f"❌ Error: {e}")
 
-# -------------------------
-# Register handlers
-# -------------------------
+-------------------------
+
+Register Handlers
+
+-------------------------
+
 def register_handlers(application):
-    application.add_handler(CommandHandler("upload", upload_cmd))
-    application.add_handler(CommandHandler("delete", delete_cmd))
-    application.add_handler(CommandHandler("edit", edit_cmd))
-    application.add_handler(CallbackQueryHandler(callback_router, pattern=r"^(upload_|edit_field::)"))
-    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, text_handler))
-    application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE & ~filters.COMMAND, photo_handler))
+application.add_handler(CommandHandler("upload", upload_cmd))
+application.add_handler(CommandHandler("edit", edit_cmd))
+application.add_handler(CommandHandler("delete", delete_cmd))
+application.add_handler(CallbackQueryHandler(callback_router, pattern=r"^upload_"))
+application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, text_handler))
+application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE & ~filters.COMMAND, photo_handler))
