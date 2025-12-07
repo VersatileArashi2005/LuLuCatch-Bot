@@ -240,3 +240,29 @@ def get_user_card_count(user_id, card_id):
         """, (user_id, card_id))
         row = cur.fetchone()
         return row['quantity'] if row else 0
+
+
+# ----------------------------
+# New functions for /edit & /delete
+# ----------------------------
+
+def search_cards_by_name(query):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, anime, character, rarity, file_id FROM cards WHERE LOWER(character) LIKE %s OR LOWER(anime) LIKE %s",
+            (f"%{query.lower()}%", f"%{query.lower()}%")
+        )
+        cards = []
+        for r in cur.fetchall():
+            rid = r[3]
+            name, _, emoji = rarity_to_text(rid)
+            cards.append({
+                "id": r[0],
+                "anime": r[1],
+                "character": r[2],
+                "rarity_name": name,
+                "rarity_emote": emoji,
+                "file_id": r[4],
+            })
+        return cards
