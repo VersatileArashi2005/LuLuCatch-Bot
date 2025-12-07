@@ -30,7 +30,7 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("info", info_cmd))
 application.add_handler(CommandHandler("check", check_cmd))
 
-# Register upload & admin handlers
+# Register upload & admin handlers (they register multiple handlers)
 register_upload_handlers(application)
 register_admin_handlers(application)
 
@@ -54,6 +54,7 @@ async def webhook_receiver(request: Request):
 @app.on_event("startup")
 async def on_startup():
     print("Starting up... init db and bot")
+    # create/migrate DB tables
     init_db()
 
     await application.initialize()
