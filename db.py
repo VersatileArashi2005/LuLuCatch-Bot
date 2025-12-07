@@ -91,6 +91,16 @@ def delete_card(card_id):
         cur.execute("DELETE FROM cards WHERE id=%s", (card_id,))
         conn.commit()
 
+def search_cards_by_text(query):
+    """Search cards by anime or character (case-insensitive)."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, anime, character, rarity, file_id FROM cards WHERE LOWER(character) LIKE %s OR LOWER(anime) LIKE %s",
+            (f"%{query.lower()}%", f"%{query.lower()}%")
+        )
+        return cur.fetchall()
+
 
 # ----------------------------
 # User Cards (Inventory)
