@@ -1,23 +1,80 @@
-from telegram import Update
-from telegram.ext import ContextTypes
-from db import get_card_by_id
-from commands.utils import rarity_to_text
+from aiogram import Router, types
+from aiogram.filters import Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text("Usage: /check <card_id>")
-        return
-    card_id = int(args[0])
-    card = get_card_by_id(card_id)
+from db import get_card_info, get_card_top_owners, get_user_card_count
+
+router = Router()
+
+# /check <card_id>
+@router.message(Command("check"))
+async def check_card(message: types.Message):
+    args = message.text.split()
+
+    # Validate arguments
+    if len(args) < 2:
+        return await message.answer("❌ Usage: /check <card_id>")
+
+    card_id = args[1]
+
+    # Fetch card info
+    card = await get_card_info(card_id)
     if not card:
-        await update.message.reply_text("Card not found.")
-        return
-    character = card.get('character') or card.get('name') or "Unknown"
-    anime = card.get('anime', 'Unknown')
-    rarity_id = card.get('rarity', 0)
-    file_id = card.get('file_id')
-    rarity_name, percent, emoji = rarity_to_text(rarity_id)
-    caption = f"{emoji} {character}\n📌 ID: {card_id}\n🎬 Anime: {anime}\n🏷 Rarity: {rarity_name.capitalize()} ({percent}%)"
-    # send photo (works with file_id or URL)
-    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=file_id, caption=caption)
+        return await message.answer("❌ Card not found.")
+
+    card_name = card["name"]
+    anime = card["anime"]
+    rarity = card["rarity"]
+    image_url = card["image_url"]
+
+    # Fetch top 5 owners
+    top_owners = await get_card_top_owners(card_id)
+
+    if top_owners:
+        rank_text = "🏆 *Top Owners*\n"
+        for i, owner in enumerate(top_owners, start=1):
+            uid = owner["user_id"]
+            count = owner["count"]
+            username = f"[User](tg://user?id={uid})"
+            rank_text += f"{i}. {username} — *{count}*\n"
+    else:
+        rank_text = "No owners yet."
+
+    # Build caption
+    caption = (
+        f"🆔 *ID:* {card_id}\n"
+        f"🎴 *Name:* {card_name}\n"
+        f"📺 *Anime:* {anime}\n"
+        f"💎 *Rarity:* {rarity}\n\n"
+        f"{rank_text}"
+    )
+
+    # Build inline button
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="How Many I Have",
+        callback_data=f"check_have:{card_id}"
+    )
+    kb.adjust(1)
+
+    # Send image + caption
+    await message.answer_photo(
+        photo=image_url,
+        caption=caption,
+        reply_markup=kb.as_markup(),
+        parse_mode="Markdown"
+    )
+
+
+# Callback — "How Many I Have"
+@router.callback_query(lambda c: c.data.startswith("check_have:"))
+async def check_have_callback(callback: types.CallbackQuery):
+    card_id = callback.data.split(":")[1]
+    user_id = callback.from_user.id
+
+    count = await get_user_card_count(user_id, card_id)
+
+    await callback.answer(
+        f"You own {count} copies of this card.",
+        show_alert=True
+    )
