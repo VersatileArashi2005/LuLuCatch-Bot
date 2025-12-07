@@ -1,4 +1,3 @@
-# commands/check.py
 from telegram import Update
 from telegram.ext import ContextTypes
 from db import get_card_by_id
@@ -14,11 +13,11 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not card:
         await update.message.reply_text("Card not found.")
         return
-    name = card['name']
-    anime = card['anime']
-    rarity_id = card['rarity']
-    file_id = card['file_id']
+    character = card.get('character') or card.get('name') or "Unknown"
+    anime = card.get('anime', 'Unknown')
+    rarity_id = card.get('rarity', 0)
+    file_id = card.get('file_id')
     rarity_name, percent, emoji = rarity_to_text(rarity_id)
-    caption = f"{emoji} {name}\n📌 ID: {card_id}\n🎬 Anime: {anime}\n🏷 Rarity: {rarity_name.capitalize()} ({percent}%)"
-    # file_id is Telegram file_id stored earlier; send_photo works for both file_id or URL
+    caption = f"{emoji} {character}\n📌 ID: {card_id}\n🎬 Anime: {anime}\n🏷 Rarity: {rarity_name.capitalize()} ({percent}%)"
+    # send photo (works with file_id or URL)
     await context.bot.send_photo(chat_id=update.effective_chat.id, photo=file_id, caption=caption)
