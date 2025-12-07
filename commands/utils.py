@@ -1,6 +1,8 @@
 # commands/utils.py
 
-# Updated rarity mapping
+# -------------------------
+# Rarity mapping
+# -------------------------
 RARITY = {
     1: ("common", 35.0, "🟢"),
     2: ("common+", 25.0, "🟠"),
@@ -14,29 +16,32 @@ RARITY = {
     10: ("ultimate", 0.5, "🔥"),
 }
 
-def rarity_to_text(rarity_id):
+# -------------------------
+# Helpers
+# -------------------------
+def rarity_to_text(rarity_id: int):
     """
     Return tuple: (name, percent, emoji)
     """
     return RARITY.get(rarity_id, ("unknown", 0.0, "❔"))
 
-def format_telegram_name(user):
+def format_telegram_name(user: dict):
     """
     Input: user dict from DB
     Output: first_name or fallback
     """
-    return user.get("first_name", "Unknown User")
+    return user.get("first_name") or user.get("username") or "Unknown User"
 
-def format_card_for_inline(card):
+def format_card_for_inline(card: dict):
     """
-    Input: card dict from DB
-    Output: dict with title, description, and optional image for inline query
+    Format a card for inline query display.
+    Returns dict with title, description, photo_file_id, and card_id
     """
     if not card:
         return None
 
-    name, pct, emoji = rarity_to_text(card.get("rarity", 0))
-    title = f"{emoji} {card.get('character', 'Unknown')} ({name.capitalize()})"
+    rarity_name, _, rarity_emoji = rarity_to_text(card.get("rarity", 0))
+    title = f"{rarity_emoji} {card.get('character', 'Unknown')} ({rarity_name.capitalize()})"
     description = f"🎬 {card.get('anime', 'Unknown Anime')} — ID: {card.get('id', 0)}"
     return {
         "title": title,
