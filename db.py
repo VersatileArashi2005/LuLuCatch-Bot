@@ -1,6 +1,7 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
+from commands.utils import rarity_to_text  # import utils helper
 
 DB_HOST = os.environ.get("PGHOST")
 DB_PORT = os.environ.get("PGPORT", 5432)
@@ -18,71 +19,6 @@ def get_conn():
         password=DB_PASS,
         cursor_factory=RealDictCursor
     )
-
-
-def init_db():
-    """Safe migration-style init: create tables if not exists."""
-    with get_conn() as conn:
-        cur = conn.cursor()
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            first_name TEXT,
-            role TEXT DEFAULT 'user',
-            last_catch TEXT
-        );
-        """)
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS user_cards (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT NOT NULL REFERENCES users(user_id),
-            card_id INT NOT NULL REFERENCES cards(id) DEFERRABLE INITIALLY DEFERRED,
-            quantity INT DEFAULT 1
-        );
-        """)
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS groups (
-            chat_id BIGINT PRIMARY KEY,
-            title TEXT
-        );
-        """)
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS chat_stats (
-            chat_id BIGINT PRIMARY KEY,
-            message_count BIGINT DEFAULT 0
-        );
-        """)
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS cards (
-            id SERIAL PRIMARY KEY,
-            anime TEXT NOT NULL,
-            character TEXT NOT NULL,
-            rarity INT NOT NULL,
-            file_id TEXT NOT NULL,
-            uploader_user_id BIGINT REFERENCES users(user_id)
-        );
-        """)
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS active_drops (
-            chat_id BIGINT NOT NULL,
-            card_id INT NOT NULL REFERENCES cards(id),
-            claimed_by BIGINT REFERENCES users(user_id),
-            PRIMARY KEY (chat_id, card_id)
-        );
-        """)
-
-        # indexes
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_user_id);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_usercards_user ON user_cards(user_id);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_active_drops_chat ON active_drops(chat_id);")
-
-        conn.commit()
 
 
 def ensure_user(user_id, first_name):
@@ -104,18 +40,6 @@ def get_user_by_id(user_id):
         return cur.fetchone()
 
 
-def register_group(chat_id, title):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO groups (chat_id, title)
-            VALUES (%s, %s)
-            ON CONFLICT (chat_id) DO UPDATE
-            SET title = EXCLUDED.title
-        """, (chat_id, title))
-        conn.commit()
-
-
 def add_card(anime, character, rarity, file_id, uploader_user_id=None):
     with get_conn() as conn:
         cur = conn.cursor()
@@ -130,7 +54,6 @@ def add_card(anime, character, rarity, file_id, uploader_user_id=None):
 
 
 def give_card_to_user(user_id, card_id, qty=1):
-    """Add card to user's inventory (user_cards). If existing, increment quantity."""
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("SELECT id, quantity FROM user_cards WHERE user_id=%s AND card_id=%s", (user_id, card_id))
@@ -168,40 +91,17 @@ def get_user_cards(user_id):
         return cur.fetchall()
 
 
-# ----------------------------
-# New functions for /edit & /delete
-# ----------------------------
-
-def update_card(card_id, anime=None, character=None, rarity=None, file_id=None):
-    """
-    Update card info. Only fields provided (non-None) are updated.
-    """
-    if all(v is None for v in [anime, character, rarity, file_id]):
-        return  # nothing to do
+def update_card(card_id, field, value):
+    """Update a single field of a card."""
+    if field not in ['anime', 'character', 'rarity', 'file_id']:
+        raise ValueError("Invalid field")
     with get_conn() as conn:
         cur = conn.cursor()
-        fields = []
-        values = []
-        if anime is not None:
-            fields.append("anime=%s")
-            values.append(anime)
-        if character is not None:
-            fields.append("character=%s")
-            values.append(character)
-        if rarity is not None:
-            fields.append("rarity=%s")
-            values.append(rarity)
-        if file_id is not None:
-            fields.append("file_id=%s")
-            values.append(file_id)
-        values.append(card_id)
-        sql = f"UPDATE cards SET {', '.join(fields)} WHERE id=%s"
-        cur.execute(sql, values)
+        cur.execute(f"UPDATE cards SET {field}=%s WHERE id=%s", (value, card_id))
         conn.commit()
 
 
 def delete_card(card_id):
-    """Delete card and remove it from all inventories & drops"""
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("DELETE FROM user_cards WHERE card_id=%s", (card_id,))
@@ -209,42 +109,6 @@ def delete_card(card_id):
         cur.execute("DELETE FROM cards WHERE id=%s", (card_id,))
         conn.commit()
 
-
-# -----------------------------------------------------
-# NEW REQUIRED FUNCTIONS FOR /check  (added by ChatGPT)
-# -----------------------------------------------------
-
-def get_top_owners(card_id):
-    """Return top 5 users with highest quantity of this card."""
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT user_id, SUM(quantity) AS total
-            FROM user_cards
-            WHERE card_id = %s
-            GROUP BY user_id
-            ORDER BY total DESC
-            LIMIT 5
-        """, (card_id,))
-        return cur.fetchall()
-
-
-def get_user_card_count(user_id, card_id):
-    """Return how many copies the user owns of this card."""
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT quantity
-            FROM user_cards
-            WHERE user_id = %s AND card_id = %s
-        """, (user_id, card_id))
-        row = cur.fetchone()
-        return row['quantity'] if row else 0
-
-
-# ----------------------------
-# New functions for /edit & /delete
-# ----------------------------
 
 def search_cards_by_name(query):
     with get_conn() as conn:
@@ -255,14 +119,14 @@ def search_cards_by_name(query):
         )
         cards = []
         for r in cur.fetchall():
-            rid = r[3]
+            rid = r['rarity']
             name, _, emoji = rarity_to_text(rid)
             cards.append({
-                "id": r[0],
-                "anime": r[1],
-                "character": r[2],
+                "id": r['id'],
+                "anime": r['anime'],
+                "character": r['character'],
                 "rarity_name": name,
                 "rarity_emote": emoji,
-                "file_id": r[4],
+                "file_id": r['file_id'],
             })
         return cards
