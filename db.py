@@ -1,4 +1,3 @@
-# db.py
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
@@ -23,12 +22,12 @@ def get_conn():
     )
 
 # =========================
-# Initialize tables if not exists
+# Initialize tables if not exists (safe migration)
 # =========================
 def init_db():
     with get_conn() as conn:
         cur = conn.cursor()
-
+        
         # users table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -38,7 +37,7 @@ def init_db():
             last_catch TEXT
         );
         """)
-
+        
         # groups table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS groups (
@@ -46,7 +45,7 @@ def init_db():
             title TEXT
         );
         """)
-
+        
         # cards table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS cards (
@@ -58,8 +57,8 @@ def init_db():
             uploader_user_id BIGINT REFERENCES users(user_id)
         );
         """)
-
-        # create index for uploader_user_id
+        
+        # create index if not exists
         cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_user_id);
         """)
@@ -67,7 +66,7 @@ def init_db():
         conn.commit()
 
 # =========================
-# Ensure user exists
+# Ensure user exists in DB
 # =========================
 def ensure_user(user_id, first_name):
     with get_conn() as conn:
