@@ -1,10 +1,9 @@
 # commands/check.py
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
 from db import get_card_by_id, get_user_cards, get_user_by_id
 from commands.utils import rarity_to_text
 
-# /check command
 async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args or not args[0].isdigit():
@@ -20,33 +19,39 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Rarity text + emote
     rarity_name, _, rarity_emote = rarity_to_text(card["rarity"])
 
+    # Card Info Text
     card_info_text = (
-        f"Card Info:\n"
-        f"🆔 : {card['id']}\n"
-        f"🎬 Anime : {card['anime']}\n"
-        f"Character : {card['character']}\n"
-        f"Rarity : {rarity_emote} {rarity_name}\n"
+        f"🆔 ID: {card['id']}\n"
+        f"🎬 Anime: {card['anime']}\n"
+        f"Character: {card['character']}\n"
+        f"Rarity: {rarity_emote} {rarity_name}"
     )
 
-    # Top owners
-    user_cards_all = get_user_cards(None)  # get all users with this card
+    # Send Photo if exists
+    if card.get("file_id"):
+        await update.message.reply_photo(
+            photo=card["file_id"],
+            caption=card_info_text
+        )
+    else:
+        await update.message.reply_text(card_info_text)
+
+    # Top Owners
+    all_users_cards = get_user_cards(None)  # get all users with any cards
     owners = []
-    for uc in user_cards_all:
+    for uc in all_users_cards:
         if uc["card_id"] == card_id:
-            owners.append((uc["user_id"], uc["quantity"]))
+            user = get_user_by_id(uc["user_id"])
+            if user:
+                fullname = user.get("first_name", "")
+                owners.append((fullname, uc["quantity"]))
 
     if not owners:
         owners_text = "No one owns this card yet."
     else:
-        # sort by quantity descending
         owners.sort(key=lambda x: x[1], reverse=True)
         owners_text = "Top Owners:\n"
-        for i, (user_id, qty) in enumerate(owners[:5], start=1):
-            user = get_user_by_id(user_id)
-            if user:
-                name = user.get("first_name", str(user_id))
-            else:
-                name = str(user_id)
+        for i, (name, qty) in enumerate(owners[:5], start=1):
             owners_text += f"Top {i}: {name} — {qty} cards\n"
 
     # Button: How many I have
@@ -54,31 +59,9 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("How Many I Have", callback_data=f"how_many_{card_id}")]
     ])
 
-    await update.message.reply_text(
-        card_info_text + "\n" + owners_text,
-        reply_markup=keyboard,
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(owners_text, reply_markup=keyboard)
+    
 
-# Callback query handler for "How Many I Have" button
-async def how_many_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not query or not query.data.startswith("how_many_"):
-        return
-
-    card_id = int(query.data.split("_")[-1])
-    user_id = query.from_user.id
-
-    user_cards = get_user_cards(user_id)
-    qty = 0
-    for uc in user_cards:
-        if uc["card_id"] == card_id:
-            qty = uc["quantity"]
-            break
-
-    await query.answer(f"You have {qty} of this card.", show_alert=True)
-
-# Register handlers
+# Register handler
 def register_check_handlers(application):
     application.add_handler(CommandHandler("check", check_cmd))
-    application.add_handler(CallbackQueryHandler(how_many_callback, pattern="how_many_"))
