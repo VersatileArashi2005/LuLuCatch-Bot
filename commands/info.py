@@ -1,13 +1,15 @@
+from telegram import Update
+from telegram.ext import ContextTypes
 from db import get_user_by_id
 
-async def info_cmd(user_id):
-    user = get_user_by_id(user_id)
-    if not user:
-        return f"User {user_id} not found."
-    
-    first_name = user.get("first_name", "Unknown")
-    role = user.get("role", "user")
-    last_catch = user.get("last_catch", "None")
-    
-    return f"User Info:\nName: {first_name}\nRole: {role}\nLast Catch: {last_catch}"
-
+async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # reply-based
+    if not update.message or not update.message.reply_to_message:
+        await update.message.reply_text("Reply to a user's message with /info to see their info.")
+        return
+    target = update.message.reply_to_message.from_user
+    u = get_user_by_id(target.id)
+    if not u:
+        await update.message.reply_text("No record for that user.")
+        return
+    await update.message.reply_text(f"👤 {u.get('first_name')} ({u.get('user_id')})\nRole: {u.get('role')}\nLast catch: {u.get('last_catch')}")
