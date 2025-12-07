@@ -70,6 +70,15 @@ def ensure_user(telegram_id, first_name):
         conn.commit()
 
 # =========================
+# Get user by telegram_id
+# =========================
+def get_user_by_telegram(telegram_id):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE telegram_id=%s", (telegram_id,))
+        return cur.fetchone()
+
+# =========================
 # Register group
 # =========================
 def register_group(chat_id, title):
