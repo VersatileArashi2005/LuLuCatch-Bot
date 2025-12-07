@@ -4,14 +4,13 @@ from fastapi import FastAPI, Request
 
 # telegram bot imports
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 # config
 from config import BOT_TOKEN, WEBHOOK_URL, PORT
 
 # db
-import db
-from db import init_db, register_group, ensure_user
+from db import init_db, register_group
 
 # commands
 from commands.start import start
@@ -41,6 +40,23 @@ async def group_message_listener(update, context):
         register_group(chat.id, chat.title)
 
 application.add_handler(MessageHandler(filters.ALL & filters.ChatType.GROUPS, group_message_listener))
+
+# ---- CallbackQuery for buttons (like Help) ----
+async def help_callback(update: Update, context):
+    query = update.callback_query
+    if query and query.data == "help_menu":
+        await query.answer()  # answer callback to remove "loading..."
+        help_text = (
+            "📜 **Available Commands:**\n\n"
+            "/start - Show welcome message and buttons\n"
+            "/info - Get your info\n"
+            "/check - Check something\n"
+            "/upload - Upload a card (if allowed)\n"
+            # add other commands here if needed
+        )
+        await query.message.reply_text(help_text, parse_mode="Markdown")
+
+application.add_handler(CallbackQueryHandler(help_callback, pattern="help_menu"))
 
 # ---- Webhook Receiver ----
 @app.post("/webhook")
