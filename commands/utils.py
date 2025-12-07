@@ -1,4 +1,6 @@
 # commands/utils.py
+
+# rarity_id : (name, percent, emoji)
 RARITY = {
     1: ("bronze", 100, "🥉"),
     2: ("silver", 90, "🥈"),
@@ -12,6 +14,10 @@ RARITY = {
     10: ("supernatural", 1, "👑"),
 }
 
-def rarity_to_text(rarity_id):
-    r = RARITY.get(rarity_id, ("unknown", 0, "❔"))
-    return r  # (name, percent, emoji)
+
+def rarity_to_text(rarity_id: int):
+    """
+    Returns tuple: (name, percent, emoji)
+    Safe fallback for unknown rarity values.
+    """
+    return RARITY.get(rarity_id, ("unknown", 0, "❔"))
