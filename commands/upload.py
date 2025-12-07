@@ -1,80 +1,63 @@
+# upload.py
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
-from db import get_anime_list, get_characters, add_anime, add_character, add_card
+from telegram.ext import CommandHandler, CallbackQueryHandler, CallbackContext
+from db import add_card
 
-async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    anime_list = get_anime_list()
-    
-    keyboard = []
-    for anime in anime_list:
-        keyboard.append([InlineKeyboardButton(anime, callback_data=f"anime_{anime}")])
-    
-    # Add button to add new anime
-    keyboard.append([InlineKeyboardButton("Add Anime Name", callback_data="anime_add")])
+RARITY = {
+    1: ("bronze", "100%", "🥉"),
+    2: ("silver", "90%", "🥈"),
+    3: ("rare", "80%", "🔹"),
+    4: ("epic", "70%", "💥"),
+    5: ("platinum", "40%", "💎"),
+    6: ("emerald", "30%", "💚"),
+    7: ("diamond", "10%", "💎"),
+    8: ("mythical", "5%", "🌟"),
+    9: ("legendary", "2%", "🏆"),
+    10: ("supernatural", "1%", "👑"),
+}
+
+user_upload_state = {}  # temp storage: {user_id: {"anime": "", "character": "", "rarity": 0}}
+
+def upload(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    keyboard = [[InlineKeyboardButton("Add Anime Name", callback_data="anime_add")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text("Step 1: Select Anime Name or Add New", reply_markup=reply_markup)
+    update.message.reply_text("Step 1: Please choose Anime Name", reply_markup=reply_markup)
+    user_upload_state[user_id] = {}
 
-
-async def upload_anime(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def upload_anime(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
-    data = query.data
-    
-    if data == "anime_add":
-        await query.edit_message_text("Send the new Anime Name in reply to this message.")
-        return
-    else:
-        context.user_data['anime'] = data.replace("anime_", "")
-        characters = get_characters(context.user_data['anime'])
-        keyboard = []
-        for char in characters:
-            keyboard.append([InlineKeyboardButton(char, callback_data=f"character_{char}")])
-        keyboard.append([InlineKeyboardButton("Add Character", callback_data="character_add")])
-        await query.edit_message_text("Step 2: Select Character or Add New", reply_markup=InlineKeyboardMarkup(keyboard))
+    user_id = query.from_user.id
+    # store anime name
+    user_upload_state[user_id]["anime"] = query.data.replace("anime_", "")
+    query.answer()
+    query.edit_message_text(text="Step 2: Please enter Character Name")
 
+def upload_character(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    character_name = update.message.text
+    user_upload_state[user_id]["character"] = character_name
+    # show Rarity buttons
+    keyboard = [
+        [InlineKeyboardButton(f"{v[2]} {v[0]} ({v[1]})", callback_data=f"rarity_{k}") ] for k,v in RARITY.items()
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text("Step 3: Choose Rarity", reply_markup=reply_markup)
 
-async def upload_character(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def upload_rarity(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
-    data = query.data
-    
-    if data == "character_add":
-        await query.edit_message_text("Send the new Character Name in reply to this message.")
-        return
-    else:
-        context.user_data['character'] = data.replace("character_", "")
-        # Step 3: Rarity selection
-        keyboard = [
-            [InlineKeyboardButton("Bronze 💰", callback_data="rarity_1")],
-            [InlineKeyboardButton("Silver ⚪", callback_data="rarity_2")],
-            [InlineKeyboardButton("Rare 🔹", callback_data="rarity_3")],
-            [InlineKeyboardButton("Epic 🔥", callback_data="rarity_4")],
-            [InlineKeyboardButton("Platinum 💎", callback_data="rarity_5")],
-            [InlineKeyboardButton("Emerald 💚", callback_data="rarity_6")],
-            [InlineKeyboardButton("Diamond 💎", callback_data="rarity_7")],
-            [InlineKeyboardButton("Mythical 🌟", callback_data="rarity_8")],
-            [InlineKeyboardButton("Legendary 🏆", callback_data="rarity_9")],
-            [InlineKeyboardButton("Supernatural 👑", callback_data="rarity_10")],
-        ]
-        await query.edit_message_text("Step 3: Select Rarity", reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-async def upload_rarity(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    user_id = query.from_user.id
     rarity_id = int(query.data.replace("rarity_", ""))
-    context.user_data['rarity'] = rarity_id
-    
-    # Save card in DB
-    add_card(
-        name=context.user_data.get('character'),
-        anime=context.user_data.get('anime'),
-        rarity=rarity_id,
-        uploader_id=query.from_user.id
-    )
-    
-    await query.edit_message_text(f"✅ Card uploaded:\nAnime: {context.user_data.get('anime')}\nCharacter: {context.user_data.get('character')}\nRarity ID: {rarity_id}")
-    
-    # TODO: Notify groups
+    user_upload_state[user_id]["rarity"] = rarity_id
+    # finalize upload
+    data = user_upload_state[user_id]
+    add_card(name="TempCard", anime=data["anime"], character=data["character"], rarity=data["rarity"])
+    query.answer()
+    query.edit_message_text(text=f"Upload complete!\nAnime: {data['anime']}\nCharacter: {data['character']}\nRarity: {RARITY[rarity_id][0]}")
+    del user_upload_state[user_id]
+
+def upload_handlers(app):
+    app.add_handler(CommandHandler("upload", upload))
+    app.add_handler(CallbackQueryHandler(upload_anime, pattern="^anime_"))
+    app.add_handler(MessageHandler(Filters.text & ~Filters.command, upload_character))
+    app.add_handler(CallbackQueryHandler(upload_rarity, pattern="^rarity_"))
