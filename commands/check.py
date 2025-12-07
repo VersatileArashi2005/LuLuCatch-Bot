@@ -20,22 +20,6 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Rarity text + emote
     rarity_name, _, rarity_emote = rarity_to_text(card["rarity"])
 
-    card_info_text = (
-        f"🆔 ID: {card['id']}\n"
-        f"🎬 Anime: {card['anime']}\n"
-        f"Character: {card['character']}\n"
-        f"Rarity: {rarity_emote} {rarity_name}"
-    )
-
-    # Send Photo if exists
-    if card.get("file_id"):
-        await update.message.reply_photo(
-            photo=card["file_id"],
-            caption=card_info_text
-        )
-    else:
-        await update.message.reply_text(card_info_text)
-
     # Top owners
     all_users_cards = get_user_cards(None)  # get all users with any cards
     owners = []
@@ -56,12 +40,32 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, (name, qty) in enumerate(owners[:5], start=1):
             owners_text += f"Top {i}: {name} — {qty} cards\n"
 
+    # Compose full caption/message
+    caption_text = (
+        f"🆔 ID: {card['id']}\n"
+        f"🎬 Anime: {card['anime']}\n"
+        f"Character: {card['character']}\n"
+        f"Rarity: {rarity_emote} {rarity_name.capitalize()}\n\n"
+        f"{owners_text}"
+    )
+
     # Button: How many I have
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("How Many I Have", callback_data=f"how_many_{card_id}")]
     ])
 
-    await update.message.reply_text(owners_text, reply_markup=keyboard)
+    # Send as Photo if exists, otherwise as text
+    if card.get("file_id"):
+        await update.message.reply_photo(
+            photo=card["file_id"],
+            caption=caption_text,
+            reply_markup=keyboard
+        )
+    else:
+        await update.message.reply_text(
+            caption_text,
+            reply_markup=keyboard
+        )
 
 # Callback query handler for "How Many I Have" button
 async def how_many_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
