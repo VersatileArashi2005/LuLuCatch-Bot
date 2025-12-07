@@ -44,7 +44,7 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user = get_user_by_id(uc["user_id"])
             if user:
                 fullname = user.get("first_name", "")
-                if "last_name" in user:
+                if user.get("last_name"):
                     fullname += f" {user['last_name']}"
                 owners.append((fullname.strip(), uc["quantity"]))
 
