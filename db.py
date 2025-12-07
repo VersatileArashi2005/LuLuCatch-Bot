@@ -27,7 +27,7 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         cur = conn.cursor()
-        
+
         # users table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -36,7 +36,7 @@ def init_db():
             role TEXT DEFAULT 'user'
         );
         """)
-        
+
         # groups table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS groups (
@@ -44,7 +44,7 @@ def init_db():
             title TEXT
         );
         """)
-        
+
         # cards table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS cards (
@@ -52,31 +52,22 @@ def init_db():
             name TEXT NOT NULL,
             anime TEXT NOT NULL,
             rarity INT NOT NULL,
-            file_id TEXT NOT NULL
+            file_id TEXT NOT NULL,
+            uploader_telegram_id BIGINT
         );
         """)
 
-        # add uploader_telegram_id column safely
+        # add foreign key safely
         try:
             cur.execute("""
             ALTER TABLE cards
-            ADD COLUMN uploader_telegram_id BIGINT;
+            ADD CONSTRAINT IF NOT EXISTS fk_uploader
+            FOREIGN KEY (uploader_telegram_id) REFERENCES users(telegram_id);
             """)
-        except psycopg2.errors.DuplicateColumn:
-            pass  # column already exists
+        except Exception:
+            pass  # ignore if fails
 
-        # add foreign key if users.telegram_id exists
-        try:
-            cur.execute("""
-            ALTER TABLE cards
-            ADD CONSTRAINT fk_uploader FOREIGN KEY (uploader_telegram_id) REFERENCES users(telegram_id);
-            """)
-        except psycopg2.errors.DuplicateObject:
-            pass  # constraint already exists
-        except psycopg2.errors.UndefinedColumn:
-            pass  # users.telegram_id doesn't exist yet
-
-        # create index if not exists
+        # create index safely
         try:
             cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_telegram_id);
