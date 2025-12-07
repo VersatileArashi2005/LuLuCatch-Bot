@@ -1,3 +1,4 @@
+# db.py
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
@@ -22,12 +23,12 @@ def get_conn():
     )
 
 # =========================
-# Initialize tables if not exists (safe migration)
+# Initialize tables if not exists
 # =========================
 def init_db():
     with get_conn() as conn:
         cur = conn.cursor()
-        
+
         # users table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -37,7 +38,7 @@ def init_db():
             last_catch TEXT
         );
         """)
-        
+
         # groups table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS groups (
@@ -45,7 +46,7 @@ def init_db():
             title TEXT
         );
         """)
-        
+
         # cards table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS cards (
@@ -53,42 +54,20 @@ def init_db():
             name TEXT NOT NULL,
             anime TEXT NOT NULL,
             rarity INT NOT NULL,
-            file_id TEXT NOT NULL
+            file_id TEXT NOT NULL,
+            uploader_user_id BIGINT REFERENCES users(user_id)
         );
         """)
 
-        # add uploader_user_id column safely
-        try:
-            cur.execute("""
-            ALTER TABLE cards
-            ADD COLUMN uploader_user_id BIGINT;
-            """)
-        except psycopg2.errors.DuplicateColumn:
-            pass  # column already exists
-
-        # add foreign key referencing users.user_id
-        try:
-            cur.execute("""
-            ALTER TABLE cards
-            ADD CONSTRAINT fk_uploader FOREIGN KEY (uploader_user_id) REFERENCES users(user_id);
-            """)
-        except psycopg2.errors.DuplicateObject:
-            pass  # constraint already exists
-        except psycopg2.errors.UndefinedColumn:
-            pass  # users.user_id doesn't exist yet
-
-        # create index if not exists
-        try:
-            cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_user_id);
-            """)
-        except Exception:
-            pass
+        # create index for uploader_user_id
+        cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_user_id);
+        """)
 
         conn.commit()
 
 # =========================
-# Ensure user exists in DB
+# Ensure user exists
 # =========================
 def ensure_user(user_id, first_name):
     with get_conn() as conn:
@@ -136,12 +115,6 @@ def add_card(name, anime, rarity, file_id, uploader_user_id=None):
         card_id = cur.fetchone()['id']
         conn.commit()
         return card_id
-
-# =========================
-# Give card to user (optional inventory logic)
-# =========================
-def give_card_to_user(user_id, card_id):
-    pass  # implement if needed
 
 # =========================
 # Get all registered groups
