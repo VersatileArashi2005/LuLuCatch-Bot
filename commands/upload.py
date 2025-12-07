@@ -1,6 +1,12 @@
 # commands/upload.py
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import (
+    ContextTypes,
+    CallbackQueryHandler,
+    MessageHandler,
+    CommandHandler,  # <-- Added this import
+    filters
+)
 from db import add_card, ensure_user, give_card_to_user, register_group, get_all_groups
 from commands.utils import rarity_to_text
 import re
@@ -16,18 +22,26 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Expect format: /upload Name|Anime
     parts = text.split(" ", 1)
     if len(parts) < 2:
-        await update.message.reply_text("Usage: /upload <Name>|<Anime>\nExample: /upload Nami|One Piece\nAfter this I will ask you to send the image.")
+        await update.message.reply_text(
+            "Usage: /upload <Name>|<Anime>\n"
+            "Example: /upload Nami|One Piece\n"
+            "After this I will ask you to send the image."
+        )
         return
 
     payload = parts[1].strip()
     if "|" not in payload:
-        await update.message.reply_text("Please separate Name and Anime with a pipe '|' character. Example: /upload Nami|One Piece")
+        await update.message.reply_text(
+            "Please separate Name and Anime with a pipe '|' character. Example: /upload Nami|One Piece"
+        )
         return
 
     name, anime = [p.strip() for p in payload.split("|", 1)]
     # Set default rarity prompt (user will be asked to choose rarity after image)
     pending_uploads[user.id] = {"name": name, "anime": anime, "rarity": None}
-    await update.message.reply_text("Got it. Please send the card image now (in this chat or in bot DM). After image, I'll ask you to choose rarity.")
+    await update.message.reply_text(
+        "Got it. Please send the card image now (in this chat or in bot DM). After image, I'll ask you to choose rarity."
+    )
 
 # photo handler to finalize upload
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -74,11 +88,16 @@ async def upload_rarity_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Notify uploader
     name, pct, emoji = rarity_to_text(rid)
-    await query.edit_message_text(f"✅ Uploaded card id {card_id}\n{name.capitalize()} {emoji} ({pct}%)\nAnime: {info['anime']}\nName: {info['name']}")
+    await query.edit_message_text(
+        f"✅ Uploaded card id {card_id}\n{name.capitalize()} {emoji} ({pct}%)\nAnime: {info['anime']}\nName: {info['name']}"
+    )
 
     # Notify all registered groups
     groups = get_all_groups()
-    caption = f"🎴 New card uploaded!\n{emoji} {info['name']}\n📌 ID: {card_id}\n🎬 Anime: {info['anime']}\n🏷 Rarity: {name.capitalize()} ({pct}%)\nTry to claim it in chat!"
+    caption = (
+        f"🎴 New card uploaded!\n{emoji} {info['name']}\n📌 ID: {card_id}\n"
+        f"🎬 Anime: {info['anime']}\n🏷 Rarity: {name.capitalize()} ({pct}%)\nTry to claim it in chat!"
+    )
     for chat_id in groups:
         try:
             await context.bot.send_photo(chat_id=chat_id, photo=info['file_id'], caption=caption)
