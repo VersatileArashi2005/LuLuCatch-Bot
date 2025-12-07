@@ -15,7 +15,7 @@ from db import init_db, register_group
 # commands
 from commands.start import start
 from commands.info import info_cmd
-from commands.check import check_cmd
+from commands.check import register_check_handlers
 from commands.upload import register_handlers as register_upload_handlers
 from commands.admin import register_admin_handlers
 
@@ -24,10 +24,12 @@ app = FastAPI()
 # Initialize bot application
 application = Application.builder().token(BOT_TOKEN).build()
 
-# Register command handlers
+# Register basic command handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("info", info_cmd))
-application.add_handler(CommandHandler("check", check_cmd))
+
+# Register /check handlers
+register_check_handlers(application)
 
 # Register upload & admin handlers (they register multiple handlers)
 register_upload_handlers(application)
@@ -50,7 +52,7 @@ async def help_callback(update: Update, context):
             "📜 **Available Commands:**\n\n"
             "/start - Show welcome message and buttons\n"
             "/info - Get your info\n"
-            "/check - Check something\n"
+            "/check - Check a card\n"
             "/upload - Upload a card (if allowed)\n"
             # add other commands here if needed
         )
