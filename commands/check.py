@@ -2,14 +2,12 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
 from db import get_card_by_id, get_user_cards, get_user_by_id
-from commands.utils import rarity_to_text
+from commands.utils import rarity_to_text, format_telegram_name
 
 # Helper to get Telegram display name
 def get_telegram_name(user_id):
     user = get_user_by_id(user_id)
-    if user:
-        return user.get("first_name", f"User {user_id}")
-    return f"User {user_id}"
+    return format_telegram_name(user) if user else f"User {user_id}"
 
 async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -47,7 +45,6 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         owners.sort(key=lambda x: x[1], reverse=True)
         owners_text = "Top Owners:\n"
         for i, (user_id, qty) in enumerate(owners[:5], start=1):
-            # use mention
             owners_text += f"Top {i}: [{get_telegram_name(user_id)}](tg://user?id={user_id}) — {qty} cards\n"
 
     # Button: How many I have
