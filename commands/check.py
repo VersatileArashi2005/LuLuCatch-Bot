@@ -2,7 +2,7 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
 from db import get_card_by_id, get_user_cards, get_user_by_id
-from commands.utils import rarity_to_text
+from commands.utils import rarity_to_text, format_telegram_name
 
 # /check command
 async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -20,6 +20,22 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Rarity text + emote
     rarity_name, _, rarity_emote = rarity_to_text(card["rarity"])
 
+    card_info_text = (
+        f"🆔 ID: {card['id']}\n"
+        f"🎬 Anime: {card['anime']}\n"
+        f"Character: {card['character']}\n"
+        f"Rarity: {rarity_emote} {rarity_name}"
+    )
+
+    # Send Photo if exists
+    if card.get("file_id"):
+        await update.message.reply_photo(
+            photo=card["file_id"],
+            caption=card_info_text
+        )
+    else:
+        await update.message.reply_text(card_info_text)
+
     # Top owners
     all_users_cards = get_user_cards(None)  # get all users with any cards
     owners = []
@@ -27,45 +43,24 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if uc["card_id"] == card_id:
             user = get_user_by_id(uc["user_id"])
             if user:
-                fullname = user.get("first_name", "")
-                if user.get("last_name"):
-                    fullname += f" {user['last_name']}"
-                owners.append((fullname.strip(), uc["quantity"]))
+                name = format_telegram_name(user)
+                mention = f"[{name}](tg://user?id={uc['user_id']})"
+                owners.append((mention, uc["quantity"]))
 
     if not owners:
         owners_text = "No one owns this card yet."
     else:
         owners.sort(key=lambda x: x[1], reverse=True)
         owners_text = "Top Owners:\n"
-        for i, (name, qty) in enumerate(owners[:5], start=1):
-            owners_text += f"Top {i}: {name} — {qty} cards\n"
-
-    # Compose full caption/message
-    caption_text = (
-        f"🆔 ID: {card['id']}\n"
-        f"🎬 Anime: {card['anime']}\n"
-        f"Character: {card['character']}\n"
-        f"Rarity: {rarity_emote} {rarity_name.capitalize()}\n\n"
-        f"{owners_text}"
-    )
+        for i, (mention, qty) in enumerate(owners[:5], start=1):
+            owners_text += f"Top {i}: {mention} — {qty} cards\n"
 
     # Button: How many I have
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("How Many I Have", callback_data=f"how_many_{card_id}")]
     ])
 
-    # Send as Photo if exists, otherwise as text
-    if card.get("file_id"):
-        await update.message.reply_photo(
-            photo=card["file_id"],
-            caption=caption_text,
-            reply_markup=keyboard
-        )
-    else:
-        await update.message.reply_text(
-            caption_text,
-            reply_markup=keyboard
-        )
+    await update.message.reply_text(owners_text, reply_markup=keyboard, parse_mode="Markdown")
 
 # Callback query handler for "How Many I Have" button
 async def how_many_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
