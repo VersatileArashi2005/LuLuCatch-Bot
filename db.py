@@ -27,16 +27,17 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         cur = conn.cursor()
-
+        
         # users table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            telegram_id BIGINT PRIMARY KEY,
+            user_id BIGINT PRIMARY KEY,
             first_name TEXT,
-            role TEXT DEFAULT 'user'
+            role TEXT DEFAULT 'user',
+            last_catch TEXT
         );
         """)
-
+        
         # groups table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS groups (
@@ -44,7 +45,7 @@ def init_db():
             title TEXT
         );
         """)
-
+        
         # cards table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS cards (
@@ -52,25 +53,34 @@ def init_db():
             name TEXT NOT NULL,
             anime TEXT NOT NULL,
             rarity INT NOT NULL,
-            file_id TEXT NOT NULL,
-            uploader_telegram_id BIGINT
+            file_id TEXT NOT NULL
         );
         """)
 
-        # add foreign key safely
+        # add uploader_user_id column safely
         try:
             cur.execute("""
             ALTER TABLE cards
-            ADD CONSTRAINT IF NOT EXISTS fk_uploader
-            FOREIGN KEY (uploader_telegram_id) REFERENCES users(telegram_id);
+            ADD COLUMN uploader_user_id BIGINT;
             """)
-        except Exception:
-            pass  # ignore if fails
+        except psycopg2.errors.DuplicateColumn:
+            pass  # column already exists
 
-        # create index safely
+        # add foreign key referencing users.user_id
         try:
             cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_telegram_id);
+            ALTER TABLE cards
+            ADD CONSTRAINT fk_uploader FOREIGN KEY (uploader_user_id) REFERENCES users(user_id);
+            """)
+        except psycopg2.errors.DuplicateObject:
+            pass  # constraint already exists
+        except psycopg2.errors.UndefinedColumn:
+            pass  # users.user_id doesn't exist yet
+
+        # create index if not exists
+        try:
+            cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_user_id);
             """)
         except Exception:
             pass
@@ -80,23 +90,23 @@ def init_db():
 # =========================
 # Ensure user exists in DB
 # =========================
-def ensure_user(telegram_id, first_name):
+def ensure_user(user_id, first_name):
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO users (telegram_id, first_name)
+            INSERT INTO users (user_id, first_name)
             VALUES (%s, %s)
-            ON CONFLICT (telegram_id) DO NOTHING
-        """, (telegram_id, first_name))
+            ON CONFLICT (user_id) DO NOTHING
+        """, (user_id, first_name))
         conn.commit()
 
 # =========================
-# Get user by telegram_id
+# Get user by user_id
 # =========================
-def get_user_by_telegram(telegram_id):
+def get_user_by_id(user_id):
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM users WHERE telegram_id=%s", (telegram_id,))
+        cur.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
         return cur.fetchone()
 
 # =========================
@@ -115,14 +125,14 @@ def register_group(chat_id, title):
 # =========================
 # Add card
 # =========================
-def add_card(name, anime, rarity, file_id, uploader_telegram_id=None):
+def add_card(name, anime, rarity, file_id, uploader_user_id=None):
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO cards (name, anime, rarity, file_id, uploader_telegram_id)
+            INSERT INTO cards (name, anime, rarity, file_id, uploader_user_id)
             VALUES (%s, %s, %s, %s, %s)
             RETURNING id
-        """, (name, anime, rarity, file_id, uploader_telegram_id))
+        """, (name, anime, rarity, file_id, uploader_user_id))
         card_id = cur.fetchone()['id']
         conn.commit()
         return card_id
