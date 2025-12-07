@@ -208,3 +208,51 @@ def delete_card(card_id):
         cur.execute("DELETE FROM active_drops WHERE card_id=%s", (card_id,))
         cur.execute("DELETE FROM cards WHERE id=%s", (card_id,))
         conn.commit()
+
+
+# ---------------------------------------------------
+# New functions for /check command
+# ---------------------------------------------------
+
+def get_card_info(card_id):
+    """Return full card info: id, anime, character, rarity, file_id."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM cards WHERE id=%s", (card_id,))
+        return cur.fetchone()
+
+
+def get_card_top_owners(card_id, limit=5):
+    """
+    Return top owners of this card.
+    Example:
+    [
+        {"user_id": 111, "first_name": "A", "quantity": 10},
+        {"user_id": 222, "first_name": "B", "quantity": 7},
+        ...
+    ]
+    """
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT u.user_id, u.first_name, uc.quantity
+            FROM user_cards uc
+            JOIN users u ON u.user_id = uc.user_id
+            WHERE uc.card_id = %s
+            ORDER BY uc.quantity DESC
+            LIMIT %s
+        """, (card_id, limit))
+        return cur.fetchall()
+
+
+def get_user_card_count(user_id, card_id):
+    """Return how many copies of this card the user owns."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT quantity 
+            FROM user_cards 
+            WHERE user_id=%s AND card_id=%s
+        """, (user_id, card_id))
+        row = cur.fetchone()
+        return row["quantity"] if row else 0
