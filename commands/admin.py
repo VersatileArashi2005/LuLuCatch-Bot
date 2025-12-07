@@ -1,44 +1,33 @@
-# commands/admin.py
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
-from db import get_conn
+from db import get_user_by_id, ensure_user, get_conn
 
-# Update user role using user_id
-def set_role(user_id, role):
+def set_role(target_user_id, role):
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("UPDATE users SET role=%s WHERE user_id=%s", (role, user_id))
+        cur.execute("UPDATE users SET role=%s WHERE user_id=%s", (role, target_user_id))
         conn.commit()
 
 async def adddev(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caller = update.effective_user
-    bot_owner = int(context.bot.owner_id)
-
-    # Only bot owner can add devs
-    if caller.id != bot_owner:
-        await update.message.reply_text("❌ Only the bot owner can use this command.")
+    owner_id = int(context.bot.owner_id) if context.bot.owner_id else None
+    if caller.id != owner_id:
+        await update.message.reply_text("Only owner can use this (or you must be admin in DB).")
         return
-
-    # Must reply to a user to promote
     if not update.message.reply_to_message:
         await update.message.reply_text("Reply to a user to promote them to dev.")
         return
-
     target = update.message.reply_to_message.from_user
     set_role(target.id, "dev")
-
-    await update.message.reply_text(f"✅ {target.first_name} is now a developer.")
+    await update.message.reply_text(f"✅ {target.first_name} is now dev.")
 
 async def rmdev(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Must reply to remove
     if not update.message.reply_to_message:
-        await update.message.reply_text("Reply to a user to remove developer role.")
+        await update.message.reply_text("Reply to a user to remove dev role.")
         return
-
     target = update.message.reply_to_message.from_user
     set_role(target.id, "user")
-
-    await update.message.reply_text(f"✅ {target.first_name} is now removed from dev role.")
+    await update.message.reply_text(f"✅ {target.first_name} role removed (now user).")
 
 def register_admin_handlers(application):
     application.add_handler(CommandHandler("adddev", adddev))
