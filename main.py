@@ -1,21 +1,24 @@
-# main.py
 import os
 import uvicorn
 from fastapi import FastAPI, Request
-from telegram import Update
-from telegram.ext import Application
-from config import BOT_TOKEN, WEBHOOK_URL, PORT
-import db
 
-# imports from commands
+# telegram bot imports
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
+
+# config
+from config import BOT_TOKEN, WEBHOOK_URL, PORT
+
+# db
+import db
+from db import init_db, register_group, ensure_user
+
+# commands
 from commands.start import start
 from commands.info import info_cmd
 from commands.check import check_cmd
 from commands.upload import register_handlers as register_upload_handlers
 from commands.admin import register_admin_handlers
-
-# helpers
-from db import init_db, register_group, ensure_user
 
 app = FastAPI()
 
@@ -27,22 +30,19 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("info", info_cmd))
 application.add_handler(CommandHandler("check", check_cmd))
 
-# Register upload & admin handlers (they register multiple handlers)
+# Register upload & admin handlers
 register_upload_handlers(application)
 register_admin_handlers(application)
 
-# simple group message listener to register groups automatically
-from telegram.ext import MessageHandler, filters
-
+# Group message listener (auto register groups)
 async def group_message_listener(update, context):
     chat = update.effective_chat
-    if chat.type in ("group", "supergroup"):
-        # register group to groups table
+    if chat and chat.type in ("group", "supergroup"):
         register_group(chat.id, chat.title)
 
 application.add_handler(MessageHandler(filters.ALL & filters.ChatType.GROUPS, group_message_listener))
 
-# Webhook receiver
+# ---- Webhook Receiver ----
 @app.post("/webhook")
 async def webhook_receiver(request: Request):
     data = await request.json()
@@ -50,23 +50,27 @@ async def webhook_receiver(request: Request):
     await application.process_update(update)
     return {"ok": True}
 
-# Startup/shutdown events
+# ---- Startup ----
 @app.on_event("startup")
 async def on_startup():
     print("Starting up... init db and bot")
     init_db()
+
     await application.initialize()
+
     if WEBHOOK_URL:
-        # set webhook to WEBHOOK_URL + /webhook
         await application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+
     await application.start()
     print("Bot started.")
 
+# ---- Shutdown ----
 @app.on_event("shutdown")
 async def on_shutdown():
     print("Shutting down bot...")
     await application.stop()
     await application.shutdown()
 
+# ---- Run server ----
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=PORT)
