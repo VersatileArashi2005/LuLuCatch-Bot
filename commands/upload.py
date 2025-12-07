@@ -27,16 +27,18 @@ pending_uploads = {}
 # DB Query Helpers
 # ---------------------------------------------------
 
+import psycopg2.extras
+
 def db_list_animes():
     with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT anime FROM cards WHERE anime IS NOT NULL ORDER BY LOWER(anime)")
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT anime FROM cards WHERE anime IS NOT NULL GROUP BY anime ORDER BY LOWER(anime)")
         return [r['anime'] for r in cur.fetchall()]
 
 def db_list_characters(anime):
     with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT character FROM cards WHERE anime=%s ORDER BY LOWER(character)", (anime,))
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT character FROM cards WHERE anime=%s GROUP BY character ORDER BY LOWER(character)", (anime,))
         return [r['character'] for r in cur.fetchall()]
 
 ALLOWED_ROLES = {"owner", "dev", "admin", "uploader"}
