@@ -11,7 +11,7 @@ RARITY = {
     7: ("legendary", 3.0, "⚜️"),
     8: ("epic", 2.0, "🔱"),
     9: ("mythic", 1.0, "💀"),
-    10: ("ultimate", 0.5, "🔥"),  # you asked 10 => ultimate / unique
+    10: ("ultimate", 0.5, "🔥"),
 }
 
 def rarity_to_text(rarity_id):
@@ -19,3 +19,11 @@ def rarity_to_text(rarity_id):
     Return tuple: (name, percent, emoji)
     """
     return RARITY.get(rarity_id, ("unknown", 0.0, "❔"))
+
+# Optional: helper for Telegram display name
+def format_telegram_name(user):
+    """
+    Input: user dict from DB
+    Output: first_name or fallback
+    """
+    return user.get("first_name", "Unknown User")
