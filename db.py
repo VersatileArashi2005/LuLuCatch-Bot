@@ -107,6 +107,15 @@ def add_card(name, anime, rarity, file_id, uploader_telegram_id):
         return card_id
 
 # =========================
+# Get card by ID
+# =========================
+def get_card_by_id(card_id):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM cards WHERE id=%s", (card_id,))
+        return cur.fetchone()
+
+# =========================
 # Give card to user (optional inventory logic)
 # =========================
 def give_card_to_user(user_id, card_id):
