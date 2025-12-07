@@ -4,7 +4,14 @@ from fastapi import FastAPI, Request
 
 # telegram bot imports
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    InlineQueryHandler,
+    filters,
+)
 
 # config
 from config import BOT_TOKEN, WEBHOOK_URL, PORT
@@ -19,47 +26,48 @@ from commands.check import register_check_handlers
 from commands.upload import register_handlers as register_upload_handlers
 from commands.admin import register_admin_handlers
 
+from commands.inline import inline_query
+
 app = FastAPI()
 
 # Initialize bot application
 application = Application.builder().token(BOT_TOKEN).build()
 
-# Register basic command handlers
+# ---- Register handlers ----
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("info", info_cmd))
 
-# Register /check handlers
 register_check_handlers(application)
-
-# Register upload & admin handlers (they register multiple handlers)
 register_upload_handlers(application)
 register_admin_handlers(application)
 
-# Register Inline handlers
-from commands.inline import inline_query
-
+# Inline query handler
 application.add_handler(InlineQueryHandler(inline_query))
 
 # Group message listener (auto register groups)
-async def group_message_listener(update, context):
+async def group_message_listener(update: Update, context):
     chat = update.effective_chat
     if chat and chat.type in ("group", "supergroup"):
         register_group(chat.id, chat.title)
 
-application.add_handler(MessageHandler(filters.ALL & filters.ChatType.GROUPS, group_message_listener))
+application.add_handler(
+    MessageHandler(
+        filters.ALL & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP),
+        group_message_listener,
+    )
+)
 
-# ---- CallbackQuery for buttons (like Help) ----
+# CallbackQuery for Help
 async def help_callback(update: Update, context):
     query = update.callback_query
     if query and query.data == "help_menu":
-        await query.answer()  # answer callback to remove "loading..."
+        await query.answer()
         help_text = (
             "📜 **Available Commands:**\n\n"
             "/start - Show welcome message and buttons\n"
             "/info - Get your info\n"
             "/check - Check a card\n"
             "/upload - Upload a card (if allowed)\n"
-            # add other commands here if needed
         )
         await query.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -77,9 +85,7 @@ async def webhook_receiver(request: Request):
 @app.on_event("startup")
 async def on_startup():
     print("Starting up... init db and bot")
-    # create/migrate DB tables
     init_db()
-
     await application.initialize()
 
     if WEBHOOK_URL:
