@@ -1,80 +1,78 @@
-from aiogram import Router, types
-from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
+from db import get_card_by_id, get_top_owners, get_user_card_count
 
-from db import get_card_info, get_card_top_owners, get_user_card_count
+# -------------------------
+# /check command handler
+# -------------------------
+async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /check <card_id>")
+        return
 
-router = Router()
+    try:
+        card_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Card ID must be a number.")
+        return
 
-# /check <card_id>
-@router.message(Command("check"))
-async def check_card(message: types.Message):
-    args = message.text.split()
-
-    # Validate arguments
-    if len(args) < 2:
-        return await message.answer("❌ Usage: /check <card_id>")
-
-    card_id = args[1]
-
-    # Fetch card info
-    card = await get_card_info(card_id)
+    card = get_card_by_id(card_id)
     if not card:
-        return await message.answer("❌ Card not found.")
+        await update.message.reply_text(f"No card found with ID {card_id}.")
+        return
 
-    card_name = card["name"]
-    anime = card["anime"]
-    rarity = card["rarity"]
-    image_url = card["image_url"]
+    # Top 5 owners
+    top_users = get_top_owners(card_id)
+    top_text = ""
+    for i, owner in enumerate(top_users, start=1):
+        top_text += f"Top {i}: User {owner['user_id']} — {owner['total']} cards\n"
 
-    # Fetch top 5 owners
-    top_owners = await get_card_top_owners(card_id)
+    # Message text
+    msg_text = (
+        f"**Card Info:**\n"
+        f"ID: {card['id']}\n"
+        f"Anime: {card['anime']}\n"
+        f"Character: {card['character']}\n"
+        f"Rarity: {card['rarity']}\n\n"
+        f"**Top Owners:**\n{top_text}"
+    )
 
-    if top_owners:
-        rank_text = "🏆 *Top Owners*\n"
-        for i, owner in enumerate(top_owners, start=1):
-            uid = owner["user_id"]
-            count = owner["count"]
-            username = f"[User](tg://user?id={uid})"
-            rank_text += f"{i}. {username} — *{count}*\n"
+    # Inline button
+    keyboard = [
+        [InlineKeyboardButton("How Many I Have", callback_data=f"mycount_{card_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Send message with card photo + caption
+    if card.get("file_id"):
+        await update.message.reply_photo(
+            photo=card["file_id"],
+            caption=msg_text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
     else:
-        rank_text = "No owners yet."
-
-    # Build caption
-    caption = (
-        f"🆔 *ID:* {card_id}\n"
-        f"🎴 *Name:* {card_name}\n"
-        f"📺 *Anime:* {anime}\n"
-        f"💎 *Rarity:* {rarity}\n\n"
-        f"{rank_text}"
-    )
-
-    # Build inline button
-    kb = InlineKeyboardBuilder()
-    kb.button(
-        text="How Many I Have",
-        callback_data=f"check_have:{card_id}"
-    )
-    kb.adjust(1)
-
-    # Send image + caption
-    await message.answer_photo(
-        photo=image_url,
-        caption=caption,
-        reply_markup=kb.as_markup(),
-        parse_mode="Markdown"
-    )
+        await update.message.reply_text(msg_text, parse_mode="Markdown", reply_markup=reply_markup)
 
 
-# Callback — "How Many I Have"
-@router.callback_query(lambda c: c.data.startswith("check_have:"))
-async def check_have_callback(callback: types.CallbackQuery):
-    card_id = callback.data.split(":")[1]
-    user_id = callback.from_user.id
+# -------------------------
+# Button handler
+# -------------------------
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()  # acknowledge button press
 
-    count = await get_user_card_count(user_id, card_id)
+    data = query.data
+    if data.startswith("mycount_"):
+        card_id = int(data.split("_")[1])
+        user_id = query.from_user.id
+        qty = get_user_card_count(user_id, card_id)
+        await query.answer(f"You have {qty} of this card.", show_alert=True)
 
-    await callback.answer(
-        f"You own {count} copies of this card.",
-        show_alert=True
-    )
+
+# -------------------------
+# Register handlers
+# -------------------------
+def register_check_handlers(application):
+    application.add_handler(CommandHandler("check", check_cmd))
+    application.add_handler(CallbackQueryHandler(button_handler))
