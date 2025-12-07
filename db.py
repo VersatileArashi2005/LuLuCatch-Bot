@@ -3,13 +3,18 @@ from psycopg2.extras import RealDictCursor
 import os
 from commands.utils import rarity_to_text  # import utils helper
 
+# -------------------------
+# Database config from env
+# -------------------------
 DB_HOST = os.environ.get("PGHOST")
 DB_PORT = os.environ.get("PGPORT", 5432)
 DB_NAME = os.environ.get("PGDATABASE")
 DB_USER = os.environ.get("PGUSER")
 DB_PASS = os.environ.get("PGPASSWORD")
 
-
+# -------------------------
+# Connection helper
+# -------------------------
 def get_conn():
     return psycopg2.connect(
         host=DB_HOST,
@@ -20,7 +25,76 @@ def get_conn():
         cursor_factory=RealDictCursor
     )
 
+# -------------------------
+# Initialize database tables
+# -------------------------
+def init_db():
+    """Create tables if they don't exist."""
+    with get_conn() as conn:
+        cur = conn.cursor()
 
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            first_name TEXT,
+            role TEXT DEFAULT 'user',
+            last_catch TEXT
+        );
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_cards (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(user_id),
+            card_id INT NOT NULL REFERENCES cards(id) DEFERRABLE INITIALLY DEFERRED,
+            quantity INT DEFAULT 1
+        );
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS groups (
+            chat_id BIGINT PRIMARY KEY,
+            title TEXT
+        );
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS chat_stats (
+            chat_id BIGINT PRIMARY KEY,
+            message_count BIGINT DEFAULT 0
+        );
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS cards (
+            id SERIAL PRIMARY KEY,
+            anime TEXT NOT NULL,
+            character TEXT NOT NULL,
+            rarity INT NOT NULL,
+            file_id TEXT NOT NULL,
+            uploader_user_id BIGINT REFERENCES users(user_id)
+        );
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS active_drops (
+            chat_id BIGINT NOT NULL,
+            card_id INT NOT NULL REFERENCES cards(id),
+            claimed_by BIGINT REFERENCES users(user_id),
+            PRIMARY KEY (chat_id, card_id)
+        );
+        """)
+
+        # indexes for performance
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_user_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_usercards_user ON user_cards(user_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_active_drops_chat ON active_drops(chat_id);")
+
+        conn.commit()
+
+# -------------------------
+# User helpers
+# -------------------------
 def ensure_user(user_id, first_name):
     with get_conn() as conn:
         cur = conn.cursor()
@@ -40,6 +114,30 @@ def get_user_by_id(user_id):
         return cur.fetchone()
 
 
+# -------------------------
+# Group helpers
+# -------------------------
+def register_group(chat_id, title):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO groups (chat_id, title)
+            VALUES (%s, %s)
+            ON CONFLICT (chat_id) DO UPDATE
+            SET title = EXCLUDED.title
+        """, (chat_id, title))
+        conn.commit()
+
+
+def get_all_groups():
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT chat_id FROM groups")
+        return [r['chat_id'] for r in cur.fetchall()]
+
+# -------------------------
+# Card helpers
+# -------------------------
 def add_card(anime, character, rarity, file_id, uploader_user_id=None):
     with get_conn() as conn:
         cur = conn.cursor()
@@ -63,13 +161,6 @@ def give_card_to_user(user_id, card_id, qty=1):
         else:
             cur.execute("INSERT INTO user_cards (user_id, card_id, quantity) VALUES (%s, %s, %s)", (user_id, card_id, qty))
         conn.commit()
-
-
-def get_all_groups():
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT chat_id FROM groups")
-        return [r['chat_id'] for r in cur.fetchall()]
 
 
 def get_card_by_id(card_id):
@@ -102,6 +193,7 @@ def update_card(card_id, field, value):
 
 
 def delete_card(card_id):
+    """Delete card and remove from inventories and drops."""
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("DELETE FROM user_cards WHERE card_id=%s", (card_id,))
