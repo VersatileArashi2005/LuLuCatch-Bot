@@ -1,6 +1,6 @@
 # commands/admin.py
 from telegram import Update
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, CommandHandler  # <-- Added CommandHandler
 from db import get_user_by_telegram, ensure_user, get_conn
 import psycopg2
 
@@ -13,8 +13,8 @@ def set_role(target_telegram_id, role):
 async def adddev(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # reply-based: reply to user to promote
     caller = update.effective_user
-    if caller.id != int(context.bot.owner_id) and caller.id != int(context.bot.owner_id):  # quick owner check; you can modify
-        # Better: check caller's role via database
+    owner_id = int(context.bot.owner_id)
+    if caller.id != owner_id:
         await update.message.reply_text("Only owner can use this (or you must be admin in DB).")
         return
     if not update.message.reply_to_message:
