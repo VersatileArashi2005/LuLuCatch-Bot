@@ -43,24 +43,23 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if uc["card_id"] == card_id:
             user = get_user_by_id(uc["user_id"])
             if user:
-                name = format_telegram_name(user)
-                mention = f"[{name}](tg://user?id={uc['user_id']})"
-                owners.append((mention, uc["quantity"]))
+                fullname = format_telegram_name(user)
+                owners.append((fullname, uc["quantity"]))
 
     if not owners:
         owners_text = "No one owns this card yet."
     else:
         owners.sort(key=lambda x: x[1], reverse=True)
         owners_text = "Top Owners:\n"
-        for i, (mention, qty) in enumerate(owners[:5], start=1):
-            owners_text += f"Top {i}: {mention} — {qty} cards\n"
+        for i, (name, qty) in enumerate(owners[:5], start=1):
+            owners_text += f"Top {i}: {name} — {qty} cards\n"
 
     # Button: How many I have
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("How Many I Have", callback_data=f"how_many_{card_id}")]
     ])
 
-    await update.message.reply_text(owners_text, reply_markup=keyboard, parse_mode="Markdown")
+    await update.message.reply_text(owners_text, reply_markup=keyboard)
 
 # Callback query handler for "How Many I Have" button
 async def how_many_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
