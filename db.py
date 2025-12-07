@@ -22,11 +22,12 @@ def get_conn():
     )
 
 # =========================
-# Initialize tables if not exists
+# Initialize tables if not exists (safe migration)
 # =========================
 def init_db():
     with get_conn() as conn:
         cur = conn.cursor()
+        
         # users table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -35,6 +36,7 @@ def init_db():
             role TEXT DEFAULT 'user'
         );
         """)
+        
         # groups table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS groups (
@@ -42,18 +44,29 @@ def init_db():
             title TEXT
         );
         """)
-        # cards table
+        
+        # cards table (without uploader_telegram_id first)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS cards (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             anime TEXT NOT NULL,
             rarity INT NOT NULL,
-            file_id TEXT NOT NULL,
-            uploader_telegram_id BIGINT REFERENCES users(telegram_id)
+            file_id TEXT NOT NULL
         );
         """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_telegram_id);")
+        
+        # add uploader_telegram_id column if not exists
+        cur.execute("""
+        ALTER TABLE cards
+        ADD COLUMN IF NOT EXISTS uploader_telegram_id BIGINT REFERENCES users(telegram_id);
+        """)
+        
+        # create index if not exists
+        cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_telegram_id);
+        """)
+        
         conn.commit()
 
 # =========================
@@ -94,7 +107,7 @@ def register_group(chat_id, title):
 # =========================
 # Add card
 # =========================
-def add_card(name, anime, rarity, file_id, uploader_telegram_id):
+def add_card(name, anime, rarity, file_id, uploader_telegram_id=None):
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("""
@@ -105,15 +118,6 @@ def add_card(name, anime, rarity, file_id, uploader_telegram_id):
         card_id = cur.fetchone()['id']
         conn.commit()
         return card_id
-
-# =========================
-# Get card by ID
-# =========================
-def get_card_by_id(card_id):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM cards WHERE id=%s", (card_id,))
-        return cur.fetchone()
 
 # =========================
 # Give card to user (optional inventory logic)
@@ -129,3 +133,12 @@ def get_all_groups():
         cur = conn.cursor()
         cur.execute("SELECT chat_id FROM groups")
         return [r['chat_id'] for r in cur.fetchall()]
+
+# =========================
+# Get card by ID
+# =========================
+def get_card_by_id(card_id):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM cards WHERE id=%s", (card_id,))
+        return cur.fetchone()
