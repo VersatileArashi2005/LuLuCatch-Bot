@@ -1,4 +1,3 @@
-# commands/upload.py
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ContextTypes,
@@ -24,8 +23,7 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if len(parts) < 2:
         await update.message.reply_text(
-            "Usage: /upload <Name>|<Anime>\nExample: /upload Nami|One Piece\n"
-            "After this, send the image."
+            "Usage: /upload <character>|<anime>\nExample: /upload Nami|One Piece\nAfter this, send the image."
         )
         return
 
@@ -33,21 +31,20 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if "|" not in payload:
         await update.message.reply_text(
-            "Please separate Name and Anime with '|'\nExample: /upload Nami|One Piece"
+            "Please separate Character and Anime with '|'\nExample: /upload Nami|One Piece"
         )
         return
 
-    name, anime = [p.strip() for p in payload.split("|", 1)]
+    character, anime = [p.strip() for p in payload.split("|", 1)]
 
     pending_uploads[user.id] = {
-        "name": name,
+        "character": character,
         "anime": anime,
         "rarity": None
     }
 
     await update.message.reply_text(
-        "Got it! Now send the card **image**.\n"
-        "After image, I'll ask you to choose rarity."
+        "Got it! Now send the card image. After image, I'll ask you to choose rarity."
     )
 
 
@@ -66,18 +63,12 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Build rarity buttons
     keyboard = []
-    for rid in range(1, 10 + 1):
+    for rid in range(1, 11):
         r_name, pct, emoji = rarity_to_text(rid)
-        btn = InlineKeyboardButton(
-            f"{emoji} {r_name.capitalize()} ({pct}%)",
-            callback_data=f"upload_rarity_{rid}"
-        )
+        btn = InlineKeyboardButton(f"{emoji} {r_name.capitalize()} ({pct}%)", callback_data=f"upload_rarity_{rid}")
         keyboard.append([btn])
 
-    await update.message.reply_text(
-        "Choose a rarity for this card:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text("Choose a rarity for this card:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def upload_rarity_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,9 +84,7 @@ async def upload_rarity_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rid = int(m.group(1))
 
     if user.id not in pending_uploads:
-        await query.edit_message_text(
-            "Upload session expired. Please run /upload again."
-        )
+        await query.edit_message_text("Upload session expired. Please run /upload again.")
         return
 
     info = pending_uploads.pop(user.id)
@@ -103,8 +92,8 @@ async def upload_rarity_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Save to DB
     card_id = add_card(
-        info["name"],
         info["anime"],
+        info["character"],
         info["rarity"],
         info["file_id"],
         user.id
@@ -116,41 +105,24 @@ async def upload_rarity_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     r_name, pct, emoji = rarity_to_text(rid)
 
     await query.edit_message_text(
-        f"✅ Card uploaded!\n"
-        f"🎴 ID: {card_id}\n"
-        f"{emoji} {info['name']}\n"
-        f"🎬 {info['anime']}\n"
-        f"🏷 {r_name.capitalize()} ({pct}%)"
+        f"✅ Card uploaded!\n🎴 ID: {card_id}\n{emoji} {info['character']}\n🎬 {info['anime']}\n🏷 {r_name.capitalize()} ({pct}%)"
     )
 
     # Broadcast to all registered groups
     caption = (
-        f"🎴 New card uploaded!\n"
-        f"{emoji} {info['name']}\n"
-        f"📌 ID: {card_id}\n"
-        f"🎬 Anime: {info['anime']}\n"
-        f"🏷 Rarity: {r_name.capitalize()} ({pct}%)\n"
-        f"Try to claim it!"
+        f"🎴 New card uploaded!\n{emoji} {info['character']}\n📌 ID: {card_id}\n"
+        f"🎬 Anime: {info['anime']}\n🏷 Rarity: {r_name.capitalize()} ({pct}%)\nTry to claim it!"
     )
 
     groups = get_all_groups()
-
     for chat_id in groups:
         try:
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=info["file_id"],
-                caption=caption
-            )
-        except:
+            await context.bot.send_photo(chat_id=chat_id, photo=info["file_id"], caption=caption)
+        except Exception:
             pass
 
 
 def register_handlers(application):
     application.add_handler(CommandHandler("upload", upload_cmd))
-    application.add_handler(
-        MessageHandler(filters.PHOTO & ~filters.COMMAND, photo_handler)
-    )
-    application.add_handler(
-        CallbackQueryHandler(upload_rarity_cb, pattern=r"^upload_rarity_\d+$")
-    )
+    application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, photo_handler))
+    application.add_handler(CallbackQueryHandler(upload_rarity_cb, pattern=r"^upload_rarity_\d+$"))
