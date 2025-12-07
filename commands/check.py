@@ -1,10 +1,13 @@
 # commands/check.py
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
-from db import get_card_by_id, get_user_cards, get_user_by_id
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultPhoto
+from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, InlineQueryHandler
+from uuid import uuid4
+from db import get_card_by_id, get_user_cards, get_user_by_id, get_all_cards
 from commands.utils import rarity_to_text, format_telegram_name
 
+# -------------------------
 # /check command
+# -------------------------
 async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args or not args[0].isdigit():
@@ -17,9 +20,7 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Card with ID {card_id} not found.")
         return
 
-    # Rarity text + emote
     rarity_name, _, rarity_emote = rarity_to_text(card["rarity"])
-
     card_info_text = (
         f"🆔 ID: {card['id']}\n"
         f"🎬 Anime: {card['anime']}\n"
@@ -27,17 +28,14 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Rarity: {rarity_emote} {rarity_name}"
     )
 
-    # Send Photo if exists
+    # Send photo if exists
     if card.get("file_id"):
-        await update.message.reply_photo(
-            photo=card["file_id"],
-            caption=card_info_text
-        )
+        await update.message.reply_photo(photo=card["file_id"], caption=card_info_text)
     else:
         await update.message.reply_text(card_info_text)
 
     # Top owners
-    all_users_cards = get_user_cards(None)  # get all users with any cards
+    all_users_cards = get_user_cards(None)
     owners = []
     for uc in all_users_cards:
         if uc["card_id"] == card_id:
@@ -61,7 +59,9 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(owners_text, reply_markup=keyboard)
 
-# Callback query handler for "How Many I Have" button
+# -------------------------
+# Callback query for "How Many I Have"
+# -------------------------
 async def how_many_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query or not query.data.startswith("how_many_"):
@@ -79,7 +79,41 @@ async def how_many_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer(f"You have {qty} of this card.", show_alert=True)
 
+# -------------------------
+# Inline Query Handler
+# -------------------------
+async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query.query.lower()
+    results = []
+
+    all_cards = get_all_cards()  # DB function to return all cards
+    for card in all_cards:
+        # Simple filter: match anime or character
+        if query in card["anime"].lower() or query in card["character"].lower():
+            rarity_name, _, rarity_emote = rarity_to_text(card["rarity"])
+            caption = (
+                f"🆔 ID: {card['id']}\n"
+                f"🎬 Anime: {card['anime']}\n"
+                f"Character: {card['character']}\n"
+                f"Rarity: {rarity_emote} {rarity_name}"
+            )
+            if card.get("file_id"):
+                results.append(
+                    InlineQueryResultPhoto(
+                        id=str(uuid4()),
+                        photo_url=card["file_id"],  # if using Telegram file_id it works
+                        thumb_url=card["file_id"],
+                        caption=caption,
+                        parse_mode="Markdown"
+                    )
+                )
+
+    await update.inline_query.answer(results[:50])  # max 50 results
+
+# -------------------------
 # Register handlers
+# -------------------------
 def register_check_handlers(application):
     application.add_handler(CommandHandler("check", check_cmd))
     application.add_handler(CallbackQueryHandler(how_many_callback, pattern="how_many_"))
+    application.add_handler(InlineQueryHandler(inline_query_handler))
