@@ -35,6 +35,11 @@ register_check_handlers(application)
 register_upload_handlers(application)
 register_admin_handlers(application)
 
+# Register Inline handlers
+from commands.inline import inline_query
+
+application.add_handler(InlineQueryHandler(inline_query))
+
 # Group message listener (auto register groups)
 async def group_message_listener(update, context):
     chat = update.effective_chat
