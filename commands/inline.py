@@ -1,44 +1,39 @@
 # commands/inline.py
-from telegram import InlineQueryResultPhoto, InlineQueryResultArticle, InputTextMessageContent, Update
-from telegram.ext import ContextTypes, InlineQueryHandler
-from commands.utils import format_card_for_inline
-from db import search_cards_by_text  # DB function to search cards by anime/character
 
-import uuid
+from telegram import Update, InlineQueryResultPhoto
+from telegram.ext import ContextTypes
+from uuid import uuid4
+from db import get_all_cards  # သင့် db.py မှ get_all_cards function ကိုသုံးမယ်
+from commands.utils import rarity_to_text  # rarity_to_text helper function
 
 # -------------------------
-# Inline Query Handler
+# Inline query handler
 # -------------------------
-async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.inline_query.query.strip()
+async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query_text = update.inline_query.query.lower()
     results = []
 
-    if not query:
-        return  # Empty query, don't return anything
-
-    # Search DB for matching cards (anime/character)
-    cards = search_cards_by_text(query)  # Should return list of card dicts
-
-    for card in cards[:50]:  # Telegram allows max 50 results
-        formatted = format_card_for_inline(card)
-        if not formatted or not formatted.get("photo_file_id"):
-            continue
-
-        results.append(
-            InlineQueryResultPhoto(
-                id=str(uuid.uuid4()),
-                photo_file_id=formatted["photo_file_id"],
-                thumb_url=formatted["photo_file_id"],
-                title=formatted["title"],
-                description=formatted["description"],
-                caption=f"{formatted['title']}\n{formatted['description']}"
+    all_cards = get_all_cards()
+    for card in all_cards:
+        # search by anime or character
+        if query_text in card['anime'].lower() or query_text in card['character'].lower():
+            rarity_name, _, rarity_emote = rarity_to_text(card['rarity'])
+            caption = (
+                f"🆔 ID: {card['id']}\n"
+                f"🎬 Anime: {card['anime']}\n"
+                f"Character: {card['character']}\n"
+                f"Rarity: {rarity_emote} {rarity_name}"
             )
-        )
+            if card.get("file_id"):
+                results.append(
+                    InlineQueryResultPhoto(
+                        id=str(uuid4()),
+                        photo_url=card["file_id"],
+                        thumb_url=card["file_id"],
+                        caption=caption,
+                        parse_mode="Markdown"
+                    )
+                )
 
-    await update.inline_query.answer(results, cache_time=10, is_personal=True)
-
-# -------------------------
-# Register Inline Handler
-# -------------------------
-def register_inline_handler(application):
-    application.add_handler(InlineQueryHandler(inline_query_handler))
+    # Telegram allows max 50 results
+    await update.inline_query.answer(results[:50])
