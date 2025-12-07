@@ -1,6 +1,6 @@
 # commands/utils.py
 
-# Updated rarity mapping per your requested emotes & drop chances
+# Updated rarity mapping
 RARITY = {
     1: ("common", 35.0, "🟢"),
     2: ("common+", 25.0, "🟠"),
@@ -20,10 +20,27 @@ def rarity_to_text(rarity_id):
     """
     return RARITY.get(rarity_id, ("unknown", 0.0, "❔"))
 
-# Optional: helper for Telegram display name
 def format_telegram_name(user):
     """
     Input: user dict from DB
     Output: first_name or fallback
     """
     return user.get("first_name", "Unknown User")
+
+def format_card_for_inline(card):
+    """
+    Input: card dict from DB
+    Output: dict with title, description, and optional image for inline query
+    """
+    if not card:
+        return None
+
+    name, pct, emoji = rarity_to_text(card.get("rarity", 0))
+    title = f"{emoji} {card.get('character', 'Unknown')} ({name.capitalize()})"
+    description = f"🎬 {card.get('anime', 'Unknown Anime')} — ID: {card.get('id', 0)}"
+    return {
+        "title": title,
+        "description": description,
+        "photo_file_id": card.get("file_id"),
+        "card_id": card.get("id")
+    }
