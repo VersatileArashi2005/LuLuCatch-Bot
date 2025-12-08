@@ -60,11 +60,9 @@ except Exception as e:
 
 # ---- Register admin catch harem ----
 
-from commands.admin import register_admin_handlers
 from commands.catch import register_catch_handlers
 from commands.harem import register_harem_handlers
 
-register_admin_handlers(application)
 register_catch_handlers(application)
 register_harem_handlers(application)
 
