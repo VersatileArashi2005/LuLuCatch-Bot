@@ -102,6 +102,26 @@ def search_cards_by_text(query):
         return cur.fetchall()
 
 
+# catch system
+def get_today_catch(user_id):
+    # return number of times user caught today
+    # implement by checking last_catch date in users table
+    pass
+
+def add_card_to_user(user_id, card_id):
+    # insert or update user_cards table
+    pass
+
+# harem system
+def get_user_cards(user_id):
+    # return list of dict: {card_id, quantity}
+    pass
+
+def get_card_by_id(card_id):
+    # return single card dict from cards table
+    pass
+
+
 # ----------------------------
 # User Cards (Inventory)
 # ----------------------------
