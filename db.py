@@ -194,6 +194,64 @@ def get_user_cards(user_id=None):
 
 
 # ----------------------------
+# Missing Functions Required by catch.py
+# ----------------------------
+
+def update_user_cards(user_id, cards_list):
+    """
+    Update the user's card inventory.
+    cards_list format expected:
+    [ { 'card_id': 1, 'quantity': 3 }, ... ]
+    """
+    with get_conn() as conn:
+        cur = conn.cursor()
+
+        # Remove old card entries for this user
+        cur.execute("DELETE FROM user_cards WHERE user_id=%s", (user_id,))
+
+        # Insert updated list
+        for c in cards_list:
+            cur.execute(
+                "INSERT INTO user_cards (user_id, card_id, quantity) VALUES (%s, %s, %s)",
+                (user_id, c['card_id'], c['quantity'])
+            )
+
+        conn.commit()
+
+
+def update_last_catch(user_id, timestamp):
+    """
+    Update last_catch timestamp for user.
+    """
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET last_catch=%s WHERE user_id=%s", (timestamp, user_id))
+        conn.commit()
+
+
+def get_user_cards(user_id, raw=False):
+    """
+    Overwrite existing get_user_cards to add raw support.
+    """
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, card_id, quantity FROM user_cards WHERE user_id=%s", (user_id,))
+        rows = cur.fetchall()
+
+        if raw:
+            return rows  # keep original DB row format
+
+        # convert to simplified structure used by catch system
+        return [
+            {
+                "card_id": r["card_id"],
+                "quantity": r["quantity"]
+            }
+            for r in rows
+        ]
+
+
+# ----------------------------
 # Groups
 # ----------------------------
 def register_group(chat_id, title):
