@@ -78,11 +78,17 @@ def get_all_cards():
 
 
 def update_card(card_id, field, value):
-    if field not in ['anime', 'character', 'rarity', 'file_id']:
+    """
+    Safely update a card field.
+    Allowed fields: anime, character, rarity, file_id
+    """
+    allowed_fields = ['anime', 'character', 'rarity', 'file_id']
+    if field not in allowed_fields:
         raise ValueError("Invalid field")
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute(f"UPDATE cards SET {field}=%s WHERE id=%s", (value, card_id))
+        query = "UPDATE cards SET {}=%s WHERE id=%s".format(field)
+        cur.execute(query, (value, card_id))
         conn.commit()
 
 
@@ -105,12 +111,30 @@ def search_cards_by_text(query):
         return cur.fetchall()
 
 
+def get_card_owners(card_id, limit=5):
+    """
+    Return list of owners with quantity for a card.
+    [{'user_id':.., 'first_name':.., 'quantity':..}, ...]
+    """
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT u.user_id, u.first_name, uc.quantity
+            FROM user_cards uc
+            JOIN users u ON u.user_id = uc.user_id
+            WHERE uc.card_id=%s
+            ORDER BY uc.quantity DESC
+            LIMIT %s
+        """, (card_id, limit))
+        return cur.fetchall()
+
+
 # ----------------------------
 # Catch system (daily)
 # ----------------------------
 def get_today_catch(user_id, update=False):
     """
-    Return True if the user has caught today, else False.
+    Return True if user has caught today, else False.
     If update=True and user hasn't caught today, update last_catch.
     """
     with get_conn() as conn:
@@ -122,28 +146,27 @@ def get_today_catch(user_id, update=False):
         if not row or not row['last_catch']:
             if update:
                 cur.execute("UPDATE users SET last_catch=%s WHERE user_id=%s",
-                            (datetime.utcnow().isoformat(), user_id))
+                            (datetime.utcnow(), user_id))
                 conn.commit()
             return False
 
-        last = datetime.fromisoformat(row['last_catch'])
+        last = row['last_catch']
+        if isinstance(last, str):
+            last = datetime.fromisoformat(last)
         if last.date() == today:
             return True
         else:
             if update:
                 cur.execute("UPDATE users SET last_catch=%s WHERE user_id=%s",
-                            (datetime.utcnow().isoformat(), user_id))
+                            (datetime.utcnow(), user_id))
                 conn.commit()
             return False
 
 
 # ----------------------------
-# User Cards (Inventory)
+# User Cards / Inventory
 # ----------------------------
 def give_card_to_user(user_id, card_id, qty=1):
-    """
-    Add cards to user's inventory. If user already has it, increase quantity.
-    """
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("SELECT id, quantity FROM user_cards WHERE user_id=%s AND card_id=%s", (user_id, card_id))
@@ -156,31 +179,17 @@ def give_card_to_user(user_id, card_id, qty=1):
 
 
 def add_card_to_user(user_id, card_id):
-    """
-    Add 1 card to user and mark as caught today.
-    """
     give_card_to_user(user_id, card_id, qty=1)
     get_today_catch(user_id, update=True)
 
 
 def get_user_cards(user_id=None):
-    """
-    Return user's cards.
-    If user_id is None, return all user_cards.
-    """
     with get_conn() as conn:
         cur = conn.cursor()
         if user_id is None:
-            cur.execute("""
-                SELECT uc.id, uc.user_id, uc.card_id, uc.quantity
-                FROM user_cards uc
-            """)
+            cur.execute("SELECT id, user_id, card_id, quantity FROM user_cards")
         else:
-            cur.execute("""
-                SELECT uc.id, uc.card_id, uc.quantity
-                FROM user_cards uc
-                WHERE uc.user_id=%s
-            """, (user_id,))
+            cur.execute("SELECT id, card_id, quantity FROM user_cards WHERE user_id=%s", (user_id,))
         return cur.fetchall()
 
 
@@ -217,7 +226,7 @@ def init_db():
                 user_id BIGINT PRIMARY KEY,
                 first_name TEXT,
                 role TEXT DEFAULT 'user',
-                last_catch TEXT
+                last_catch TIMESTAMP
             );
         """)
         cur.execute("""
@@ -252,7 +261,7 @@ def init_db():
                 PRIMARY KEY (chat_id, card_id)
             );
         """)
-        # indexes
+        # Indexes
         cur.execute("CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_user_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_usercards_user ON user_cards(user_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_active_drops_chat ON active_drops(chat_id);")
