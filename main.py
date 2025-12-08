@@ -89,12 +89,14 @@ async def help_callback(update: Update, context):
         if query and query.data == "help_menu":
             await query.answer()
             help_text = (
-                "📜 **Available Commands:**\n\n"
-                "/start - Show welcome message and buttons\n"
-                "/info - Get your info\n"
-                "/check - Check a card\n"
-                "/upload - Upload a card (if allowed)\n"
-            )
+    "📜 **Available Commands:**\n\n"
+    "/start - Show welcome message and buttons\n"
+    "/info - Get your info\n"
+    "/check - Check a card\n"
+    "/upload - Upload a card (if allowed)\n"
+    "/catch - Catch a daily random card\n"
+    "/harem - View your card inventory\n"
+)
             await query.message.reply_text(help_text, parse_mode="Markdown")
     except Exception as e:
         log_error(e, "help_callback")
