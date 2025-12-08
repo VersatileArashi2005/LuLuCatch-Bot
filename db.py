@@ -1,9 +1,12 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
-from commands.utils import rarity_to_text
 from datetime import datetime
+from commands.utils import rarity_to_text
 
+# ----------------------------
+# Database Configuration
+# ----------------------------
 DB_HOST = os.environ.get("PGHOST")
 DB_PORT = os.environ.get("PGPORT", 5432)
 DB_NAME = os.environ.get("PGDATABASE")
@@ -68,7 +71,6 @@ def get_card_by_id(card_id):
 
 
 def get_all_cards():
-    """Return all cards from DB (for inline query / search)."""
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("SELECT * FROM cards")
@@ -94,7 +96,6 @@ def delete_card(card_id):
 
 
 def search_cards_by_text(query):
-    """Search cards by anime or character (case-insensitive)."""
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -105,38 +106,67 @@ def search_cards_by_text(query):
 
 
 # ----------------------------
-# User Cards (Inventory)
+# Catch system (daily)
 # ----------------------------
-def update_user_cards(user_id, card_id, quantity=1):
-    """Insert or update a user's card quantity."""
+def get_today_catch(user_id, update=False):
+    """
+    Return True if the user has caught today, else False.
+    If update=True and user hasn't caught today, update last_catch.
+    """
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT id, quantity FROM user_cards WHERE user_id=%s AND card_id=%s",
-            (user_id, card_id)
-        )
+        cur.execute("SELECT last_catch FROM users WHERE user_id=%s", (user_id,))
+        row = cur.fetchone()
+        today = datetime.utcnow().date()
+
+        if not row or not row['last_catch']:
+            if update:
+                cur.execute("UPDATE users SET last_catch=%s WHERE user_id=%s",
+                            (datetime.utcnow().isoformat(), user_id))
+                conn.commit()
+            return False
+
+        last = datetime.fromisoformat(row['last_catch'])
+        if last.date() == today:
+            return True
+        else:
+            if update:
+                cur.execute("UPDATE users SET last_catch=%s WHERE user_id=%s",
+                            (datetime.utcnow().isoformat(), user_id))
+                conn.commit()
+            return False
+
+
+# ----------------------------
+# User Cards (Inventory)
+# ----------------------------
+def give_card_to_user(user_id, card_id, qty=1):
+    """
+    Add cards to user's inventory. If user already has it, increase quantity.
+    """
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, quantity FROM user_cards WHERE user_id=%s AND card_id=%s", (user_id, card_id))
         r = cur.fetchone()
         if r:
-            cur.execute(
-                "UPDATE user_cards SET quantity = quantity + %s WHERE id=%s",
-                (quantity, r['id'])
-            )
+            cur.execute("UPDATE user_cards SET quantity = quantity + %s WHERE id=%s", (qty, r['id']))
         else:
-            cur.execute(
-                "INSERT INTO user_cards (user_id, card_id, quantity) VALUES (%s, %s, %s)",
-                (user_id, card_id, quantity)
-            )
+            cur.execute("INSERT INTO user_cards (user_id, card_id, quantity) VALUES (%s, %s, %s)", (user_id, card_id, qty))
         conn.commit()
 
 
-def give_card_to_user(user_id, card_id, qty=1):
-    return update_user_cards(user_id, card_id, qty)
+def add_card_to_user(user_id, card_id):
+    """
+    Add 1 card to user and mark as caught today.
+    """
+    give_card_to_user(user_id, card_id, qty=1)
+    get_today_catch(user_id, update=True)
 
 
 def get_user_cards(user_id=None):
     """
     Return user's cards.
-    If user_id is None, return all user_cards (for top owners / check command).
+    If user_id is None, return all user_cards.
     """
     with get_conn() as conn:
         cur = conn.cursor()
@@ -152,24 +182,6 @@ def get_user_cards(user_id=None):
                 WHERE uc.user_id=%s
             """, (user_id,))
         return cur.fetchall()
-
-
-def add_card_to_user(user_id, card_id):
-    """Wrapper for adding 1 card to a user."""
-    return update_user_cards(user_id, card_id, 1)
-
-
-def get_today_catch(user_id):
-    """Return 1 if the user caught today, else 0."""
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT last_catch FROM users WHERE user_id=%s", (user_id,))
-        row = cur.fetchone()
-        if not row or not row['last_catch']:
-            return 0
-        last = datetime.fromisoformat(row['last_catch'])
-        today = datetime.utcnow().date()
-        return 1 if last.date() == today else 0
 
 
 # ----------------------------
@@ -198,7 +210,6 @@ def get_all_groups():
 # Database Initialization
 # ----------------------------
 def init_db():
-    """Create tables if not exist."""
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("""
