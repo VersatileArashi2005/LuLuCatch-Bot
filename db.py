@@ -1,285 +1,201 @@
-import psycopg2
-from psycopg2.extras import RealDictCursor
+# db.py - Fully Async Version
 import os
+import asyncpg
 from datetime import datetime
 from commands.utils import rarity_to_text
 
-# ----------------------------
-# Database Configuration
-# ----------------------------
 DB_HOST = os.environ.get("PGHOST")
-DB_PORT = os.environ.get("PGPORT", 5432)
+DB_PORT = int(os.environ.get("PGPORT", 5432))
 DB_NAME = os.environ.get("PGDATABASE")
 DB_USER = os.environ.get("PGUSER")
 DB_PASS = os.environ.get("PGPASSWORD")
 
 
-def get_conn():
-    return psycopg2.connect(
+async def get_pool():
+    """
+    Create a connection pool.
+    """
+    return await asyncpg.create_pool(
         host=DB_HOST,
         port=DB_PORT,
-        dbname=DB_NAME,
+        database=DB_NAME,
         user=DB_USER,
         password=DB_PASS,
-        cursor_factory=RealDictCursor
     )
 
 
 # ----------------------------
 # Users
 # ----------------------------
-def ensure_user(user_id, first_name):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
+async def ensure_user(pool, user_id: int, first_name: str):
+    async with pool.acquire() as conn:
+        await conn.execute("""
             INSERT INTO users (user_id, first_name)
-            VALUES (%s, %s)
+            VALUES ($1, $2)
             ON CONFLICT (user_id) DO UPDATE
             SET first_name = EXCLUDED.first_name
-        """, (user_id, first_name))
-        conn.commit()
+        """, user_id, first_name)
 
 
-def get_user_by_id(user_id):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
-        return cur.fetchone()
+async def get_user_by_id(pool, user_id: int):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
+        return dict(row) if row else None
 
 
 # ----------------------------
 # Cards
 # ----------------------------
-def add_card(anime, character, rarity, file_id, uploader_user_id=None):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
+async def add_card(pool, anime, character, rarity, file_id, uploader_user_id=None):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
             INSERT INTO cards (anime, character, rarity, file_id, uploader_user_id)
-            VALUES (%s, %s, %s, %s, %s)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING id
-        """, (anime, character, rarity, file_id, uploader_user_id))
-        row = cur.fetchone()
-        conn.commit()
+        """, anime, character, rarity, file_id, uploader_user_id)
         return row['id']
 
 
-def get_card_by_id(card_id):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM cards WHERE id=%s", (card_id,))
-        return cur.fetchone()
+async def get_card_by_id(pool, card_id):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM cards WHERE id=$1", card_id)
+        return dict(row) if row else None
 
 
-def get_all_cards():
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM cards")
-        return cur.fetchall()
+async def get_all_cards(pool):
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM cards")
+        return [dict(r) for r in rows]
 
 
-def update_card(card_id, field, value):
-    """
-    Safely update a card field.
-    Allowed fields: anime, character, rarity, file_id
-    """
+async def update_card(pool, card_id, field, value):
     allowed_fields = ['anime', 'character', 'rarity', 'file_id']
     if field not in allowed_fields:
         raise ValueError("Invalid field")
-    with get_conn() as conn:
-        cur = conn.cursor()
-        query = "UPDATE cards SET {}=%s WHERE id=%s".format(field)
-        cur.execute(query, (value, card_id))
-        conn.commit()
+    async with pool.acquire() as conn:
+        query = f"UPDATE cards SET {field}=$1 WHERE id=$2"
+        await conn.execute(query, value, card_id)
 
 
-def delete_card(card_id):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM user_cards WHERE card_id=%s", (card_id,))
-        cur.execute("DELETE FROM active_drops WHERE card_id=%s", (card_id,))
-        cur.execute("DELETE FROM cards WHERE id=%s", (card_id,))
-        conn.commit()
+async def delete_card(pool, card_id):
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM user_cards WHERE card_id=$1", card_id)
+        await conn.execute("DELETE FROM active_drops WHERE card_id=$1", card_id)
+        await conn.execute("DELETE FROM cards WHERE id=$1", card_id)
 
 
-def search_cards_by_text(query):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT id, anime, character, rarity, file_id FROM cards WHERE LOWER(character) LIKE %s OR LOWER(anime) LIKE %s",
-            (f"%{query.lower()}%", f"%{query.lower()}%")
+async def search_cards_by_text(pool, query):
+    q = f"%{query.lower()}%"
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, anime, character, rarity, file_id FROM cards WHERE LOWER(character) LIKE $1 OR LOWER(anime) LIKE $2",
+            q, q
         )
-        return cur.fetchall()
+        return [dict(r) for r in rows]
 
 
-def get_card_owners(card_id, limit=5):
-    """
-    Return list of owners with quantity for a card.
-    [{'user_id':.., 'first_name':.., 'quantity':..}, ...]
-    """
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
+async def get_card_owners(pool, card_id, limit=5):
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
             SELECT u.user_id, u.first_name, uc.quantity
             FROM user_cards uc
             JOIN users u ON u.user_id = uc.user_id
-            WHERE uc.card_id=%s
+            WHERE uc.card_id=$1
             ORDER BY uc.quantity DESC
-            LIMIT %s
-        """, (card_id, limit))
-        return cur.fetchall()
+            LIMIT $2
+        """, card_id, limit)
+        return [dict(r) for r in rows]
 
 
 # ----------------------------
 # Catch system (daily)
 # ----------------------------
-def get_today_catch(user_id, update=False):
-    """
-    Return True if user has caught today, else False.
-    If update=True and user hasn't caught today, update last_catch.
-    """
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT last_catch FROM users WHERE user_id=%s", (user_id,))
-        row = cur.fetchone()
+async def get_today_catch(pool, user_id, update=False):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT last_catch FROM users WHERE user_id=$1", user_id)
         today = datetime.utcnow().date()
 
         if not row or not row['last_catch']:
             if update:
-                cur.execute("UPDATE users SET last_catch=%s WHERE user_id=%s",
-                            (datetime.utcnow(), user_id))
-                conn.commit()
+                await conn.execute("UPDATE users SET last_catch=$1 WHERE user_id=$2", datetime.utcnow(), user_id)
             return False
 
         last = row['last_catch']
         if isinstance(last, str):
             last = datetime.fromisoformat(last)
+
         if last.date() == today:
             return True
         else:
             if update:
-                cur.execute("UPDATE users SET last_catch=%s WHERE user_id=%s",
-                            (datetime.utcnow(), user_id))
-                conn.commit()
+                await conn.execute("UPDATE users SET last_catch=$1 WHERE user_id=$2", datetime.utcnow(), user_id)
             return False
 
 
 # ----------------------------
 # User Cards / Inventory
 # ----------------------------
-def give_card_to_user(user_id, card_id, qty=1):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, quantity FROM user_cards WHERE user_id=%s AND card_id=%s", (user_id, card_id))
-        r = cur.fetchone()
-        if r:
-            cur.execute("UPDATE user_cards SET quantity = quantity + %s WHERE id=%s", (qty, r['id']))
+async def give_card_to_user(pool, user_id, card_id, qty=1):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT id, quantity FROM user_cards WHERE user_id=$1 AND card_id=$2", user_id, card_id)
+        if row:
+            await conn.execute("UPDATE user_cards SET quantity=quantity+$1 WHERE id=$2", qty, row['id'])
         else:
-            cur.execute("INSERT INTO user_cards (user_id, card_id, quantity) VALUES (%s, %s, %s)", (user_id, card_id, qty))
-        conn.commit()
+            await conn.execute("INSERT INTO user_cards (user_id, card_id, quantity) VALUES ($1, $2, $3)", user_id, card_id, qty)
 
 
-def add_card_to_user(user_id, card_id):
-    give_card_to_user(user_id, card_id, qty=1)
-    get_today_catch(user_id, update=True)
+async def add_card_to_user(pool, user_id, card_id):
+    await give_card_to_user(pool, user_id, card_id, qty=1)
+    await get_today_catch(pool, user_id, update=True)
 
 
-def get_user_cards(user_id=None):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        if user_id is None:
-            cur.execute("SELECT id, user_id, card_id, quantity FROM user_cards")
-        else:
-            cur.execute("SELECT id, card_id, quantity FROM user_cards WHERE user_id=%s", (user_id,))
-        return cur.fetchall()
+async def get_user_cards(pool, user_id):
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT id, card_id, quantity FROM user_cards WHERE user_id=$1", user_id)
+        return [{"card_id": r["card_id"], "quantity": r["quantity"]} for r in rows]
 
 
-# ----------------------------
-# Missing Functions Required by catch.py
-# ----------------------------
-
-def update_user_cards(user_id, cards_list):
-    """
-    Update the user's card inventory.
-    cards_list format expected:
-    [ { 'card_id': 1, 'quantity': 3 }, ... ]
-    """
-    with get_conn() as conn:
-        cur = conn.cursor()
-
-        # Remove old card entries for this user
-        cur.execute("DELETE FROM user_cards WHERE user_id=%s", (user_id,))
-
-        # Insert updated list
-        for c in cards_list:
-            cur.execute(
-                "INSERT INTO user_cards (user_id, card_id, quantity) VALUES (%s, %s, %s)",
-                (user_id, c['card_id'], c['quantity'])
-            )
-
-        conn.commit()
+async def update_user_cards(pool, user_id, cards_list):
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM user_cards WHERE user_id=$1", user_id)
+            for c in cards_list:
+                await conn.execute(
+                    "INSERT INTO user_cards (user_id, card_id, quantity) VALUES ($1, $2, $3)",
+                    user_id, c['card_id'], c['quantity']
+                )
 
 
-def update_last_catch(user_id, timestamp):
-    """
-    Update last_catch timestamp for user.
-    """
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET last_catch=%s WHERE user_id=%s", (timestamp, user_id))
-        conn.commit()
-
-
-def get_user_cards(user_id, raw=False):
-    """
-    Overwrite existing get_user_cards to add raw support.
-    """
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, card_id, quantity FROM user_cards WHERE user_id=%s", (user_id,))
-        rows = cur.fetchall()
-
-        if raw:
-            return rows  # keep original DB row format
-
-        # convert to simplified structure used by catch system
-        return [
-            {
-                "card_id": r["card_id"],
-                "quantity": r["quantity"]
-            }
-            for r in rows
-        ]
+async def update_last_catch(pool, user_id, timestamp):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET last_catch=$1 WHERE user_id=$2", timestamp, user_id)
 
 
 # ----------------------------
 # Groups
 # ----------------------------
-def register_group(chat_id, title):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
+async def register_group(pool, chat_id, title):
+    async with pool.acquire() as conn:
+        await conn.execute("""
             INSERT INTO groups (chat_id, title)
-            VALUES (%s, %s)
+            VALUES ($1, $2)
             ON CONFLICT (chat_id) DO UPDATE
             SET title = EXCLUDED.title
-        """, (chat_id, title))
-        conn.commit()
+        """, chat_id, title)
 
 
-def get_all_groups():
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT chat_id FROM groups")
-        return [r['chat_id'] for r in cur.fetchall()]
+async def get_all_groups(pool):
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT chat_id FROM groups")
+        return [r['chat_id'] for r in rows]
 
 
 # ----------------------------
 # Database Initialization
 # ----------------------------
-def init_db():
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
+async def init_db(pool):
+    async with pool.acquire() as conn:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
                 first_name TEXT,
@@ -287,7 +203,7 @@ def init_db():
                 last_catch TIMESTAMP
             );
         """)
-        cur.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS cards (
                 id SERIAL PRIMARY KEY,
                 anime TEXT NOT NULL,
@@ -297,7 +213,7 @@ def init_db():
                 uploader_user_id BIGINT REFERENCES users(user_id)
             );
         """)
-        cur.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_cards (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL REFERENCES users(user_id),
@@ -305,13 +221,13 @@ def init_db():
                 quantity INT DEFAULT 1
             );
         """)
-        cur.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS groups (
                 chat_id BIGINT PRIMARY KEY,
                 title TEXT
             );
         """)
-        cur.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS active_drops (
                 chat_id BIGINT NOT NULL,
                 card_id INT NOT NULL REFERENCES cards(id),
@@ -320,7 +236,6 @@ def init_db():
             );
         """)
         # Indexes
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_user_id);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_usercards_user ON user_cards(user_id);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_active_drops_chat ON active_drops(chat_id);")
-        conn.commit()
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_uploader ON cards(uploader_user_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_usercards_user ON user_cards(user_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_active_drops_chat ON active_drops(chat_id);")
