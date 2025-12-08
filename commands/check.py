@@ -2,7 +2,7 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultPhoto
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, InlineQueryHandler
 from uuid import uuid4
-from db import get_card_by_id, get_user_cards, get_user_by_id, get_all_cards
+from db import get_card_by_id, get_card_owners, get_user_cards, get_all_cards
 from commands.utils import rarity_to_text, format_telegram_name
 
 # -------------------------
@@ -34,23 +34,15 @@ async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(card_info_text)
 
-    # Top owners
-    all_users_cards = get_user_cards(None)
-    owners = []
-    for uc in all_users_cards:
-        if uc["card_id"] == card_id:
-            user = get_user_by_id(uc["user_id"])
-            if user:
-                fullname = format_telegram_name(user)
-                owners.append((fullname, uc["quantity"]))
-
+    # Top owners (optimized DB query)
+    owners = get_card_owners(card_id)
     if not owners:
         owners_text = "No one owns this card yet."
     else:
-        owners.sort(key=lambda x: x[1], reverse=True)
         owners_text = "Top Owners:\n"
-        for i, (name, qty) in enumerate(owners[:5], start=1):
-            owners_text += f"Top {i}: {name} — {qty} cards\n"
+        for i, owner in enumerate(owners, start=1):
+            fullname = format_telegram_name(owner)
+            owners_text += f"Top {i}: {fullname} — {owner['quantity']} cards\n"
 
     # Button: How many I have
     keyboard = InlineKeyboardMarkup([
@@ -88,7 +80,6 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     all_cards = get_all_cards()  # DB function to return all cards
     for card in all_cards:
-        # Simple filter: match anime or character
         if query in card["anime"].lower() or query in card["character"].lower():
             rarity_name, _, rarity_emote = rarity_to_text(card["rarity"])
             caption = (
@@ -101,7 +92,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 results.append(
                     InlineQueryResultPhoto(
                         id=str(uuid4()),
-                        photo_url=card["file_id"],  # if using Telegram file_id it works
+                        photo_url=card["file_id"],  # works with Telegram file_id
                         thumb_url=card["file_id"],
                         caption=caption,
                         parse_mode="Markdown"
