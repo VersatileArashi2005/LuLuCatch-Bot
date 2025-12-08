@@ -1,15 +1,15 @@
-# start.py
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, CallbackQueryHandler
 from db import ensure_user, register_group
 
 # ---------- START COMMAND ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pool = context.application.bot_data.get("pool")
     user = update.effective_user
     chat = update.effective_chat
 
     # Ensure user in DB
-    ensure_user(user.id, user.first_name or user.username or "User")
+    await ensure_user(pool, user.id, user.first_name or user.username or "User")
 
     # Anime girl cute style greeting with username mention
     mention = f"[{user.first_name}](tg://user?id={user.id})"
@@ -35,7 +35,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Register group if started in a group chat
     if chat and chat.type in ("group", "supergroup"):
-        register_group(chat.id, chat.title)
+        await register_group(pool, chat.id, chat.title)
 
 
 # ---------- HELP BUTTON HANDLER ----------
