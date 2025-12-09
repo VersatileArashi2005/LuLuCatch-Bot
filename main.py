@@ -60,12 +60,61 @@ async def setup_bot() -> Application:
         .build()
     )
     
+    # Set bot start time for uptime tracking
+    set_bot_start_time()
+    
+    # ========================================
+    # Register Conversation Handlers (MUST BE FIRST)
+    # ========================================
+    
+    # Upload conversation handler
+    application.add_handler(upload_conversation_handler)
+    
+    # Broadcast conversation handler  
+    application.add_handler(broadcast_conversation_handler)
+
     # ========================================
     # Register Command Handlers
     # ========================================
     
-    # Import command handlers (to be implemented in Part 2)
-    # For now, we'll use placeholder handlers
+# Basic commands (keep your existing ones)
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("info", info_command))
+    application.add_handler(CommandHandler("help", start_command))
+    
+# Catch commands
+    application.add_handler(catch_command_handler)
+application.add_handler(force_spawn_handler)
+
+# Admin commands
+    application.add_handler(admin_command_handler)
+    application.add_handler(stats_command_handler)
+    application.add_handler(ban_command_handler)
+    application.add_handler(unban_command_handler)
+    application.add_handler(quick_upload_handler)
+    
+    # ========================================
+    # Register Callback Query Handlers
+    # ========================================
+    
+    # Admin panel callbacks
+    application.add_handler(CallbackQueryHandler(
+        admin_callback_handler,
+        pattern=r"^admin_"
+    ))
+    
+    # Catch callbacks
+    application.add_handler(CallbackQueryHandler(
+        catch_callback_handler,
+        pattern=r"^(catch_|skip_|expired)"
+    ))
+    
+    # ========================================
+    # Register Message Handlers
+    # ========================================
+
+    # Name guessing in groups
+    application.add_handler(name_guess_message_handler)
     
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handler for /start command."""
@@ -220,9 +269,9 @@ async def setup_bot() -> Application:
     commands = [
         BotCommand("start", "🚀 Start the bot"),
         BotCommand("info", "📊 Bot information"),
+        BotCommand("catch", "🎯 Catch a card"),
         BotCommand("harem", "🎴 View your collection"),
         BotCommand("check", "🔍 Check card details"),
-        BotCommand("catch", "🎯 Catch a spawned card"),
     ]
     
     await application.bot.set_my_commands(commands)
