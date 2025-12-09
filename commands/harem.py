@@ -1,50 +1,46 @@
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ContextTypes, CallbackQueryHandler, CommandHandler
+# commands/harem.py
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import CommandHandler, CallbackQueryHandler
 from db import get_user_cards, get_cards_by_ids
+from commands.utils import rarity_to_text
 
 ITEMS_PER_PAGE = 5
 
-async def harem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pool = context.application.bot_data['pool']
-    user_id = update.effective_user.id
-    user_cards = await get_user_cards(pool, user_id)
+async def harem_cmd(update: Update, context):
+    user = update.effective_user
+    pool = context.application.bot_data.get("pool")
+    user_cards = await get_user_cards(pool, user.id)
     if not user_cards:
-        await update.message.reply_text("❌ Your harem is empty.")
+        await update.message.reply_text("Your harem is empty.")
         return
-
     await show_harem_page(update, context, user_cards, 0)
 
 async def show_harem_page(update, context, user_cards, page):
-    pool = context.application.bot_data['pool']
+    pool = context.application.bot_data.get("pool")
     start = page * ITEMS_PER_PAGE
     end = start + ITEMS_PER_PAGE
     page_cards = user_cards[start:end]
-    card_ids = [uc["card_id"] for uc in page_cards]
-    cards = await get_cards_by_ids(pool, card_ids)
-
-    media_group = [{"type": "photo", "media": card["file_id"]} for card in cards]
-
+    ids = [uc["card_id"] for uc in page_cards]
+    cards = await get_cards_by_ids(pool, ids)
+    # send media group
+    media = []
+    # Use single messages: photo + caption then buttons
+    for c, uc in zip(cards, page_cards):
+        name, pct, emoji = rarity_to_text(c['rarity'])
+        caption = f"{emoji} {c['character']} — {name}\n🎬 {c['anime']}\nQty: {uc['quantity']}\nID: {c['id']}"
+        await update.message.reply_photo(photo=c['file_id'], caption=caption)
     buttons = []
     if page > 0:
         buttons.append(InlineKeyboardButton("⬅️ Back", callback_data=f"harem_{page-1}"))
     if end < len(user_cards):
         buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"harem_{page+1}"))
+    if buttons:
+        await update.message.reply_text("Navigate:", reply_markup=InlineKeyboardMarkup([buttons]))
 
-    reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
-
-    if update.message:
-        await update.message.reply_media_group(media_group)
-        if reply_markup:
-            await update.message.reply_text("Navigate your harem:", reply_markup=reply_markup)
-    elif update.callback_query:
-        await update.callback_query.message.edit_media(media_group[0])  # edit first photo as preview
-        if reply_markup:
-            await update.callback_query.message.edit_reply_markup(reply_markup)
-
-async def harem_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pool = context.application.bot_data['pool']
+async def harem_callback(update: Update, context):
     query = update.callback_query
     page = int(query.data.split("_")[1])
+    pool = context.application.bot_data.get("pool")
     user_id = query.from_user.id
     user_cards = await get_user_cards(pool, user_id)
     await show_harem_page(query, context, user_cards, page)
