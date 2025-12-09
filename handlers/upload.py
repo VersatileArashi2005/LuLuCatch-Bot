@@ -686,7 +686,7 @@ upload_conversation_handler = ConversationHandler(
         CommandHandler("cancel", upload_cancel),
         CallbackQueryHandler(upload_rarity_callback, pattern=r"^rarity_cancel$"),
     ],
-    conversation_timeout=600,  # 10 minutes timeout
+    # REMOVED: conversation_timeout=600,
     name="upload_conversation",
     persistent=False,
     per_message=False,
