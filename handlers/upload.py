@@ -700,7 +700,6 @@ upload_conversation_handler = ConversationHandler(
     conversation_timeout=300,  # 5 minute timeout
     name="upload_conversation",
     persistent=False,
-    per_message=True,
 )
 
 
