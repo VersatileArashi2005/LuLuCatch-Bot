@@ -22,7 +22,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     filters,
-    Defaults,
 )
 
 from config import Config
@@ -122,8 +121,7 @@ async def setup_bot() -> Application:
             await update.message.reply_text(
                 f"📊 *LuLuCatch Bot Info*\n\n"
                 f"🗄️ Database: ⚠️ Not Connected\n\n"
-                f"The bot is running but database is offline.\n"
-                f"Some features may be unavailable.",
+                f"The bot is running but database is offline.",
                 parse_mode="Markdown"
             )
     
@@ -131,8 +129,7 @@ async def setup_bot() -> Application:
         """Handler for /harem command."""
         if not db.is_connected:
             await update.message.reply_text(
-                "⚠️ Database is currently offline. Please try again later.",
-                parse_mode="Markdown"
+                "⚠️ Database is currently offline. Please try again later."
             )
             return
         
@@ -144,8 +141,7 @@ async def setup_bot() -> Application:
             f"📦 Unique Cards: {stats['total_unique']}\n"
             f"🎴 Total Cards: {stats['total_cards']}\n"
             f"🧿 Mythical+: {stats['mythical_plus']}\n"
-            f"⚡ Legendary: {stats['legendary_count']}\n\n"
-            f"Use inline mode to browse your collection!",
+            f"⚡ Legendary: {stats['legendary_count']}",
             parse_mode="Markdown"
         )
     
@@ -219,7 +215,11 @@ async def setup_bot() -> Application:
         BotCommand("catch", "🎯 Catch a card"),
         BotCommand("harem", "🎴 Your collection"),
     ]
-    await application.bot.set_my_commands(commands)
+    
+    try:
+        await application.bot.set_my_commands(commands)
+    except Exception as e:
+        error_logger.error(f"Failed to set commands: {e}")
     
     log_startup("✅ Bot application configured")
     
@@ -249,34 +249,50 @@ async def lifespan(app: FastAPI):
     
     app_logger.info(Config.display_config())
     
-    # Try to connect to database (non-blocking)
+    # Connect to database
     db_connected = await db.connect(max_retries=3, retry_delay=2)
     
     if db_connected:
         await init_db()
     else:
-        app_logger.warning(
-            "⚠️ Bot starting without database connection. "
-            "Some features will be unavailable."
-        )
+        app_logger.warning("⚠️ Bot starting without database connection.")
     
     # Set up Telegram bot
     bot_app = await setup_bot()
+    
+    # Initialize and start the bot
     await bot_app.initialize()
     await bot_app.start()
     
-    # Set up webhook or polling
+    # Set up webhook
     if Config.WEBHOOK_URL:
         webhook_url = Config.get_full_webhook_url()
         log_webhook(f"Setting webhook: {webhook_url}")
         
-        await bot_app.bot.set_webhook(
-            url=webhook_url,
-            secret_token=Config.WEBHOOK_SECRET,
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True
-        )
-        log_webhook("✅ Webhook configured")
+        try:
+            # Delete any existing webhook first
+            await bot_app.bot.delete_webhook(drop_pending_updates=False)
+            
+            # Set new webhook
+            webhook_set = await bot_app.bot.set_webhook(
+                url=webhook_url,
+                secret_token=Config.WEBHOOK_SECRET,
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=False,  # Process pending messages
+            )
+            
+            if webhook_set:
+                log_webhook("✅ Webhook configured successfully")
+                
+                # Verify webhook was set
+                webhook_info = await bot_app.bot.get_webhook_info()
+                log_webhook(f"Webhook URL: {webhook_info.url}")
+                log_webhook(f"Pending updates: {webhook_info.pending_update_count}")
+            else:
+                error_logger.error("❌ Failed to set webhook")
+                
+        except Exception as e:
+            error_logger.error(f"❌ Webhook error: {e}", exc_info=True)
     else:
         log_startup("Using polling mode")
         asyncio.create_task(bot_app.updater.start_polling(drop_pending_updates=True))
@@ -291,12 +307,12 @@ async def lifespan(app: FastAPI):
     log_shutdown("Shutting down...")
     
     if bot_app:
-        if Config.WEBHOOK_URL:
-            await bot_app.bot.delete_webhook()
-        else:
-            await bot_app.updater.stop()
-        await bot_app.stop()
-        await bot_app.shutdown()
+        try:
+            # Don't delete webhook on shutdown - keep it active
+            await bot_app.stop()
+            await bot_app.shutdown()
+        except Exception as e:
+            error_logger.error(f"Shutdown error: {e}")
     
     await db.disconnect()
     log_shutdown("✅ Shutdown complete")
@@ -309,6 +325,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+# ============================================================
+# 📡 API Endpoints
+# ============================================================
 
 @app.get("/")
 async def root():
@@ -334,27 +354,52 @@ async def health_check():
     }
 
 
-@app.post(Config.WEBHOOK_PATH)
+@app.post("/webhook")
 async def webhook_handler(request: Request) -> Response:
-    """Webhook endpoint."""
+    """Webhook endpoint for receiving Telegram updates."""
     global bot_app
     
+    # Verify the webhook secret token
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    
     if secret != Config.WEBHOOK_SECRET:
+        error_logger.warning(f"Invalid webhook secret received")
         raise HTTPException(status_code=403, detail="Invalid token")
     
     if not bot_app:
+        error_logger.error("Bot not initialized")
         raise HTTPException(status_code=503, detail="Bot not ready")
     
     try:
+        # Get update data
         data = await request.json()
+        
+        # Log incoming update
+        app_logger.info(f"📥 Received update: {data.get('update_id', 'unknown')}")
+        
+        # Parse and process update
         update = Update.de_json(data, bot_app.bot)
+        
+        # Process the update
         await bot_app.process_update(update)
-        return Response(status_code=200)
+        
+        return Response(status_code=200, content="OK")
+        
     except Exception as e:
-        error_logger.error(f"Webhook error: {e}", exc_info=True)
-        return Response(status_code=200)
+        error_logger.error(f"Webhook processing error: {e}", exc_info=True)
+        # Return 200 to prevent Telegram from retrying
+        return Response(status_code=200, content="Error logged")
 
+
+@app.get("/webhook")
+async def webhook_get():
+    """GET endpoint for webhook verification."""
+    return {"status": "webhook endpoint active"}
+
+
+# ============================================================
+# 🚀 Application Entry Point
+# ============================================================
 
 def main():
     """Main entry point."""
@@ -365,8 +410,9 @@ def main():
         "main:app",
         host=Config.HOST,
         port=Config.PORT,
-        reload=Config.DEBUG,
-        log_level="info" if Config.DEBUG else "warning",
+        reload=False,
+        log_level="info",
+        access_log=True,
     )
 
 
