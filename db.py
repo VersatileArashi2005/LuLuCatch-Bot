@@ -25,7 +25,6 @@ from utils.logger import app_logger, error_logger, log_database
 class Database:
     """
     Async database manager using asyncpg connection pool.
-    
     Includes Railway-compatible SSL handling and retry logic.
     """
     
@@ -33,14 +32,14 @@ class Database:
     _instance: Optional["Database"] = None
     
     def __new__(cls) -> "Database":
-        """Singleton pattern to ensure single database instance."""
+        """Singleton pattern."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
     
     @property
     def pool(self) -> Pool:
-        """Get the connection pool, raising error if not initialized."""
+        """Get the connection pool."""
         if self._pool is None:
             raise RuntimeError("Database pool not initialized. Call connect() first.")
         return self._pool
@@ -51,19 +50,13 @@ class Database:
         return self._pool is not None
     
     def _parse_database_url(self) -> dict:
-        """
-        Parse DATABASE_URL and extract connection parameters.
-        Handles Railway's postgres:// vs postgresql:// difference.
-        """
+        """Parse DATABASE_URL and extract connection parameters."""
         url = Config.DATABASE_URL
         
-        # Railway uses postgres:// but asyncpg needs postgresql://
         if url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql://", 1)
         
         parsed = urlparse(url)
-        
-        # Extract query parameters
         query_params = parse_qs(parsed.query)
         
         return {
@@ -76,34 +69,20 @@ class Database:
         }
     
     async def connect(self, max_retries: int = 5, retry_delay: int = 3) -> bool:
-        """
-        Initialize the database connection pool with retry logic.
-        
-        Args:
-            max_retries: Maximum connection attempts
-            retry_delay: Seconds between retries
-            
-        Returns:
-            True if connected successfully, False otherwise
-        """
+        """Initialize the database connection pool with retry logic."""
         if self._pool is not None:
             log_database("Connection pool already exists")
             return True
         
-        # Check if DATABASE_URL is configured
         if not Config.DATABASE_URL or Config.DATABASE_URL == "postgresql://user:password@localhost:5432/cardbot":
             error_logger.warning(
-                "⚠️ DATABASE_URL not configured! "
-                "Please add a PostgreSQL database on Railway."
+                "⚠️ DATABASE_URL not configured! Please add a PostgreSQL database on Railway."
             )
             return False
         
-        # Parse connection parameters
         db_params = self._parse_database_url()
-        
         log_database(f"Connecting to database at {db_params['host']}:{db_params['port']}...")
         
-        # SSL context for Railway
         ssl_context = None
         if db_params.get("ssl") or "railway" in str(db_params.get("host", "")):
             ssl_context = ssl.create_default_context()
@@ -111,12 +90,10 @@ class Database:
             ssl_context.verify_mode = ssl.CERT_NONE
             log_database("Using SSL connection")
         
-        # Connection string
         dsn = Config.DATABASE_URL
         if dsn.startswith("postgres://"):
             dsn = dsn.replace("postgres://", "postgresql://", 1)
         
-        # Retry loop
         for attempt in range(1, max_retries + 1):
             try:
                 log_database(f"Connection attempt {attempt}/{max_retries}...")
@@ -129,13 +106,11 @@ class Database:
                     ssl=ssl_context,
                 )
                 
-                # Test the connection
                 async with self._pool.acquire() as conn:
                     await conn.execute("SELECT 1")
                 
                 log_database(
-                    f"✅ Database connected! "
-                    f"(pool: {Config.DB_MIN_CONNECTIONS}-{Config.DB_MAX_CONNECTIONS})"
+                    f"✅ Database connected! (pool: {Config.DB_MIN_CONNECTIONS}-{Config.DB_MAX_CONNECTIONS})"
                 )
                 return True
                 
@@ -148,18 +123,13 @@ class Database:
                 return False
                 
             except Exception as e:
-                error_logger.error(
-                    f"Connection attempt {attempt} failed: {type(e).__name__}: {e}"
-                )
+                error_logger.error(f"Connection attempt {attempt} failed: {type(e).__name__}: {e}")
                 
                 if attempt < max_retries:
                     log_database(f"Retrying in {retry_delay} seconds...")
                     await asyncio.sleep(retry_delay)
                 else:
-                    error_logger.error(
-                        f"❌ Failed to connect after {max_retries} attempts. "
-                        f"Check your DATABASE_URL configuration."
-                    )
+                    error_logger.error(f"❌ Failed to connect after {max_retries} attempts.")
                     return False
         
         return False
@@ -174,7 +144,7 @@ class Database:
     
     @asynccontextmanager
     async def acquire(self):
-        """Context manager for acquiring a connection from the pool."""
+        """Context manager for acquiring a connection."""
         if not self.is_connected:
             raise RuntimeError("Database not connected")
         async with self.pool.acquire() as connection:
@@ -220,9 +190,7 @@ db = Database()
 async def init_db(pool: Optional[Pool] = None) -> bool:
     """
     Initialize database schema - create tables if they don't exist.
-    
-    Returns:
-        True if successful, False otherwise
+    Creates tables in correct order to avoid foreign key issues.
     """
     if not db.is_connected:
         log_database("⚠️ Cannot initialize schema - database not connected")
@@ -231,6 +199,10 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
     log_database("Initializing database schema...")
     
     try:
+        # ========================================
+        # Step 1: Create tables WITHOUT foreign keys
+        # ========================================
+        
         # Users Table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -252,6 +224,7 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
                 bio TEXT
             )
         """)
+        log_database("✅ Users table ready")
         
         # Cards Table
         await db.execute("""
@@ -266,25 +239,45 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
                 is_active BOOLEAN DEFAULT TRUE,
                 total_caught INTEGER DEFAULT 0,
                 description TEXT,
-                tags TEXT[],
-                UNIQUE(anime, character_name)
+                tags TEXT[]
             )
         """)
+        log_database("✅ Cards table ready")
+        
+        # Add unique constraint on cards
+        try:
+            await db.execute("""
+                ALTER TABLE cards 
+                ADD CONSTRAINT cards_anime_character_unique 
+                UNIQUE (anime, character_name)
+            """)
+        except asyncpg.DuplicateObjectError:
+            pass  # Constraint already exists
         
         # Collections Table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS collections (
                 collection_id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                card_id INTEGER NOT NULL REFERENCES cards(card_id) ON DELETE CASCADE,
+                user_id BIGINT NOT NULL,
+                card_id INTEGER NOT NULL,
                 caught_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                 caught_in_group BIGINT,
                 is_favorite BOOLEAN DEFAULT FALSE,
                 trade_locked BOOLEAN DEFAULT FALSE,
-                quantity INTEGER DEFAULT 1,
-                UNIQUE(user_id, card_id)
+                quantity INTEGER DEFAULT 1
             )
         """)
+        log_database("✅ Collections table ready")
+        
+        # Add unique constraint on collections
+        try:
+            await db.execute("""
+                ALTER TABLE collections 
+                ADD CONSTRAINT collections_user_card_unique 
+                UNIQUE (user_id, card_id)
+            """)
+        except asyncpg.DuplicateObjectError:
+            pass  # Constraint already exists
         
         # Groups Table
         await db.execute("""
@@ -303,14 +296,43 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
                 settings JSONB DEFAULT '{}'::jsonb
             )
         """)
+        log_database("✅ Groups table ready")
         
-        # Create indexes
+        # ========================================
+        # Step 2: Add foreign keys (ignore errors if exist)
+        # ========================================
+        
+        try:
+            await db.execute("""
+                ALTER TABLE collections 
+                ADD CONSTRAINT fk_collections_user 
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            """)
+        except asyncpg.DuplicateObjectError:
+            pass
+        
+        try:
+            await db.execute("""
+                ALTER TABLE collections 
+                ADD CONSTRAINT fk_collections_card 
+                FOREIGN KEY (card_id) REFERENCES cards(card_id) ON DELETE CASCADE
+            """)
+        except asyncpg.DuplicateObjectError:
+            pass
+        
+        log_database("✅ Foreign keys configured")
+        
+        # ========================================
+        # Step 3: Create indexes
+        # ========================================
+        
         await db.execute("CREATE INDEX IF NOT EXISTS idx_collections_user_id ON collections(user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_collections_card_id ON collections(card_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(rarity)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_cards_anime ON cards(anime)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_groups_active ON groups(is_active) WHERE is_active = TRUE")
         
+        log_database("✅ Indexes created")
         log_database("✅ Database schema initialized successfully")
         return True
         
@@ -330,7 +352,7 @@ async def ensure_user(
     first_name: Optional[str] = None,
     last_name: Optional[str] = None
 ) -> Optional[Record]:
-    """Ensure a user exists in the database, creating if necessary."""
+    """Ensure a user exists in the database."""
     if not db.is_connected:
         return None
     
@@ -351,8 +373,7 @@ async def get_user_by_id(pool: Optional[Pool], user_id: int) -> Optional[Record]
     """Get a user by their Telegram user ID."""
     if not db.is_connected:
         return None
-    query = "SELECT * FROM users WHERE user_id = $1"
-    return await db.fetchrow(query, user_id)
+    return await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
 
 
 async def update_user_stats(
@@ -397,7 +418,7 @@ async def add_card(
         return None
     
     if not 1 <= rarity <= 11:
-        raise ValueError(f"Invalid rarity: {rarity}. Must be between 1 and 11.")
+        raise ValueError(f"Invalid rarity: {rarity}")
     
     query = """
         INSERT INTO cards (anime, character_name, rarity, photo_file_id, uploader_id, description, tags)
@@ -405,61 +426,44 @@ async def add_card(
         ON CONFLICT (anime, character_name) DO NOTHING
         RETURNING *
     """
-    return await db.fetchrow(
-        query, anime, character, rarity, photo_file_id, uploader_id, description, tags or []
-    )
+    return await db.fetchrow(query, anime, character, rarity, photo_file_id, uploader_id, description, tags or [])
 
 
 async def get_card_by_id(pool: Optional[Pool], card_id: int) -> Optional[Record]:
     """Get a card by its ID."""
     if not db.is_connected:
         return None
-    query = "SELECT * FROM cards WHERE card_id = $1 AND is_active = TRUE"
-    return await db.fetchrow(query, card_id)
+    return await db.fetchrow("SELECT * FROM cards WHERE card_id = $1 AND is_active = TRUE", card_id)
 
 
 async def get_cards_by_ids(pool: Optional[Pool], card_ids: list[int]) -> list[Record]:
     """Get multiple cards by their IDs."""
     if not db.is_connected or not card_ids:
         return []
-    
-    query = """
-        SELECT * FROM cards 
-        WHERE card_id = ANY($1) AND is_active = TRUE
-        ORDER BY rarity DESC, character_name
-    """
-    return await db.fetch(query, card_ids)
+    return await db.fetch(
+        "SELECT * FROM cards WHERE card_id = ANY($1) AND is_active = TRUE ORDER BY rarity DESC",
+        card_ids
+    )
 
 
 async def get_random_card(pool: Optional[Pool], rarity: Optional[int] = None) -> Optional[Record]:
-    """Get a random active card, optionally filtered by rarity."""
+    """Get a random active card."""
     if not db.is_connected:
         return None
     
     if rarity:
-        query = """
-            SELECT * FROM cards 
-            WHERE is_active = TRUE AND rarity = $1
-            ORDER BY RANDOM() 
-            LIMIT 1
-        """
-        return await db.fetchrow(query, rarity)
-    else:
-        query = """
-            SELECT * FROM cards 
-            WHERE is_active = TRUE
-            ORDER BY RANDOM() 
-            LIMIT 1
-        """
-        return await db.fetchrow(query)
+        return await db.fetchrow(
+            "SELECT * FROM cards WHERE is_active = TRUE AND rarity = $1 ORDER BY RANDOM() LIMIT 1",
+            rarity
+        )
+    return await db.fetchrow("SELECT * FROM cards WHERE is_active = TRUE ORDER BY RANDOM() LIMIT 1")
 
 
 async def get_card_count(pool: Optional[Pool]) -> int:
     """Get total number of active cards."""
     if not db.is_connected:
         return 0
-    query = "SELECT COUNT(*) FROM cards WHERE is_active = TRUE"
-    result = await db.fetchval(query)
+    result = await db.fetchval("SELECT COUNT(*) FROM cards WHERE is_active = TRUE")
     return result or 0
 
 
@@ -467,8 +471,7 @@ async def increment_card_caught(pool: Optional[Pool], card_id: int) -> None:
     """Increment the total_caught counter for a card."""
     if not db.is_connected:
         return
-    query = "UPDATE cards SET total_caught = total_caught + 1 WHERE card_id = $1"
-    await db.execute(query, card_id)
+    await db.execute("UPDATE cards SET total_caught = total_caught + 1 WHERE card_id = $1", card_id)
 
 
 # ============================================================
@@ -481,7 +484,7 @@ async def add_to_collection(
     card_id: int,
     group_id: Optional[int] = None
 ) -> Optional[Record]:
-    """Add a card to a user's collection or increment quantity."""
+    """Add a card to user's collection or increment quantity."""
     if not db.is_connected:
         return None
     
@@ -516,29 +519,25 @@ async def get_user_collection(
             WHERE c.user_id = $1 AND ca.rarity = $2
         """
         main_query = """
-            SELECT c.*, ca.anime, ca.character_name, ca.rarity, 
-                   ca.photo_file_id, ca.description
+            SELECT c.*, ca.anime, ca.character_name, ca.rarity, ca.photo_file_id
             FROM collections c
             JOIN cards ca ON c.card_id = ca.card_id
             WHERE c.user_id = $1 AND ca.rarity = $4
-            ORDER BY ca.rarity DESC, ca.character_name
+            ORDER BY ca.rarity DESC
             LIMIT $2 OFFSET $3
         """
         total = await db.fetchval(count_query, user_id, rarity_filter)
         cards = await db.fetch(main_query, user_id, per_page, offset, rarity_filter)
     else:
-        count_query = "SELECT COUNT(*) FROM collections WHERE user_id = $1"
-        main_query = """
-            SELECT c.*, ca.anime, ca.character_name, ca.rarity, 
-                   ca.photo_file_id, ca.description
+        total = await db.fetchval("SELECT COUNT(*) FROM collections WHERE user_id = $1", user_id)
+        cards = await db.fetch("""
+            SELECT c.*, ca.anime, ca.character_name, ca.rarity, ca.photo_file_id
             FROM collections c
             JOIN cards ca ON c.card_id = ca.card_id
             WHERE c.user_id = $1
-            ORDER BY ca.rarity DESC, ca.character_name
+            ORDER BY ca.rarity DESC
             LIMIT $2 OFFSET $3
-        """
-        total = await db.fetchval(count_query, user_id)
-        cards = await db.fetch(main_query, user_id, per_page, offset)
+        """, user_id, per_page, offset)
     
     return cards, total or 0
 
@@ -546,14 +545,9 @@ async def get_user_collection(
 async def get_user_collection_stats(pool: Optional[Pool], user_id: int) -> dict:
     """Get statistics about a user's collection."""
     if not db.is_connected:
-        return {
-            "total_unique": 0,
-            "total_cards": 0,
-            "mythical_plus": 0,
-            "legendary_count": 0,
-        }
+        return {"total_unique": 0, "total_cards": 0, "mythical_plus": 0, "legendary_count": 0}
     
-    query = """
+    row = await db.fetchrow("""
         SELECT 
             COUNT(*) as total_unique,
             COALESCE(SUM(c.quantity), 0) as total_cards,
@@ -562,9 +556,7 @@ async def get_user_collection_stats(pool: Optional[Pool], user_id: int) -> dict:
         FROM collections c
         JOIN cards ca ON c.card_id = ca.card_id
         WHERE c.user_id = $1
-    """
-    
-    row = await db.fetchrow(query, user_id)
+    """, user_id)
     
     if row:
         return {
@@ -573,36 +565,26 @@ async def get_user_collection_stats(pool: Optional[Pool], user_id: int) -> dict:
             "mythical_plus": row["mythical_plus"] or 0,
             "legendary_count": row["legendary_count"] or 0,
         }
-    return {
-        "total_unique": 0,
-        "total_cards": 0,
-        "mythical_plus": 0,
-        "legendary_count": 0,
-    }
+    return {"total_unique": 0, "total_cards": 0, "mythical_plus": 0, "legendary_count": 0}
 
 
 # ============================================================
 # 👥 Group Operations
 # ============================================================
 
-async def ensure_group(
-    pool: Optional[Pool],
-    group_id: int,
-    group_name: Optional[str] = None
-) -> Optional[Record]:
+async def ensure_group(pool: Optional[Pool], group_id: int, group_name: Optional[str] = None) -> Optional[Record]:
     """Ensure a group exists in the database."""
     if not db.is_connected:
         return None
     
-    query = """
+    return await db.fetchrow("""
         INSERT INTO groups (group_id, group_name)
         VALUES ($1, $2)
         ON CONFLICT (group_id) DO UPDATE SET
             group_name = COALESCE($2, groups.group_name),
             is_active = TRUE
         RETURNING *
-    """
-    return await db.fetchrow(query, group_id, group_name)
+    """, group_id, group_name)
 
 
 async def get_all_groups(pool: Optional[Pool], active_only: bool = True) -> list[Record]:
@@ -611,118 +593,82 @@ async def get_all_groups(pool: Optional[Pool], active_only: bool = True) -> list
         return []
     
     if active_only:
-        query = "SELECT * FROM groups WHERE is_active = TRUE ORDER BY joined_at"
-    else:
-        query = "SELECT * FROM groups ORDER BY joined_at"
-    
-    return await db.fetch(query)
+        return await db.fetch("SELECT * FROM groups WHERE is_active = TRUE ORDER BY joined_at")
+    return await db.fetch("SELECT * FROM groups ORDER BY joined_at")
 
 
 async def get_group_by_id(pool: Optional[Pool], group_id: int) -> Optional[Record]:
     """Get a specific group by ID."""
     if not db.is_connected:
         return None
-    query = "SELECT * FROM groups WHERE group_id = $1"
-    return await db.fetchrow(query, group_id)
+    return await db.fetchrow("SELECT * FROM groups WHERE group_id = $1", group_id)
 
 
-async def update_group_spawn(
-    pool: Optional[Pool],
-    group_id: int,
-    card_id: int,
-    message_id: int
-) -> None:
+async def update_group_spawn(pool: Optional[Pool], group_id: int, card_id: int, message_id: int) -> None:
     """Update the current spawned card in a group."""
     if not db.is_connected:
         return
-    
-    query = """
+    await db.execute("""
         UPDATE groups SET
             current_card_id = $2,
             current_card_message_id = $3,
             last_spawn = NOW(),
             total_spawns = total_spawns + 1
         WHERE group_id = $1
-    """
-    await db.execute(query, group_id, card_id, message_id)
+    """, group_id, card_id, message_id)
 
 
 async def clear_group_spawn(pool: Optional[Pool], group_id: int) -> None:
-    """Clear the current spawned card in a group after it's caught."""
+    """Clear the current spawned card in a group."""
     if not db.is_connected:
         return
-    
-    query = """
+    await db.execute("""
         UPDATE groups SET
             current_card_id = NULL,
             current_card_message_id = NULL,
             total_catches = total_catches + 1
         WHERE group_id = $1
-    """
-    await db.execute(query, group_id)
+    """, group_id)
 
 
 # ============================================================
-# 📊 Statistics & Analytics
+# 📊 Statistics
 # ============================================================
 
 async def get_global_stats(pool: Optional[Pool]) -> dict:
     """Get global bot statistics."""
     if not db.is_connected:
-        return {
-            "total_users": 0,
-            "total_cards": 0,
-            "total_catches": 0,
-            "active_groups": 0,
-        }
+        return {"total_users": 0, "total_cards": 0, "total_catches": 0, "active_groups": 0}
     
     try:
-        queries = {
-            "total_users": "SELECT COUNT(*) FROM users",
-            "total_cards": "SELECT COUNT(*) FROM cards WHERE is_active = TRUE",
-            "total_catches": "SELECT COALESCE(SUM(total_catches), 0) FROM users",
-            "active_groups": "SELECT COUNT(*) FROM groups WHERE is_active = TRUE",
-        }
-        
-        stats = {}
-        for key, query in queries.items():
-            result = await db.fetchval(query)
-            stats[key] = int(result or 0)
-        
-        return stats
-    except Exception as e:
-        error_logger.error(f"Error getting global stats: {e}")
         return {
-            "total_users": 0,
-            "total_cards": 0,
-            "total_catches": 0,
-            "active_groups": 0,
+            "total_users": await db.fetchval("SELECT COUNT(*) FROM users") or 0,
+            "total_cards": await db.fetchval("SELECT COUNT(*) FROM cards WHERE is_active = TRUE") or 0,
+            "total_catches": int(await db.fetchval("SELECT COALESCE(SUM(total_catches), 0) FROM users") or 0),
+            "active_groups": await db.fetchval("SELECT COUNT(*) FROM groups WHERE is_active = TRUE") or 0,
         }
+    except Exception as e:
+        error_logger.error(f"Error getting stats: {e}")
+        return {"total_users": 0, "total_cards": 0, "total_catches": 0, "active_groups": 0}
 
 
 async def get_rarity_distribution(pool: Optional[Pool]) -> list[Record]:
     """Get the distribution of cards by rarity."""
     if not db.is_connected:
         return []
-    
-    query = """
+    return await db.fetch("""
         SELECT rarity, COUNT(*) as count
-        FROM cards
-        WHERE is_active = TRUE
-        GROUP BY rarity
-        ORDER BY rarity
-    """
-    return await db.fetch(query)
+        FROM cards WHERE is_active = TRUE
+        GROUP BY rarity ORDER BY rarity
+    """)
 
 
 async def health_check(pool: Optional[Pool]) -> bool:
     """Perform a database health check."""
     if not db.is_connected:
         return False
-    
     try:
         await db.fetchval("SELECT 1")
         return True
-    except Exception as e:
-        error_logger.error(f"Database health check failed: {e}")
+    except Exception:
         return False
