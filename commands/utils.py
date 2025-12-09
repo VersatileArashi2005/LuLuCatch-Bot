@@ -1,20 +1,21 @@
-# commands/utils.py
-# Rarity mapping (1-10) — Custom per user's list
+# rarity mapping as requested
 RARITY = {
-    1: ("Normal", 35.0, "🛞"),
+    1: ("Normal", 40.0, "🛞"),
     2: ("Common", 25.0, "🌀"),
     3: ("Uncommon", 15.0, "🥏"),
-    4: ("Rare", 10.0, "☘️"),
-    5: ("Epic", 7.0, "🫧"),
-    6: ("Limited Edition", 5.0, "🎐"),
-    7: ("Platinum", 3.0, "❄️"),
-    8: ("Emerald", 2.0, "💎"),
-    9: ("Crystal", 1.0, "🌸"),
-    10: ("Legendary", 0.5, "⚡"),
+    4: ("Rare", 8.0, "☘️"),
+    5: ("Epic", 5.0, "🫧"),
+    6: ("Limited Edition", 3.0, "🎐"),
+    7: ("Platinum", 1.5, "❄️"),
+    8: ("Emerald", 1.0, "💎"),
+    9: ("Crystal", 0.4, "🌸"),
+    10: ("Mythical", 0.09, "🧿"),
+    11: ("Legendary", 0.01, "⚡"),
 }
 
 def rarity_to_text(rid: int):
+    """Return (name, pct, emoji). If unknown, returns placeholders."""
     return RARITY.get(rid, ("Unknown", 0.0, "❔"))
 
-def format_telegram_name(user: dict):
-    return user.get("first_name") or user.get("username") or "Unknown User"
+def format_telegram_name(user_dict):
+    return user_dict.get("first_name") or user_dict.get("username") or "Unknown"
