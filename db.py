@@ -1,14 +1,13 @@
-# db.py
+# db.py - asyncpg pool helper and DB functions
 import os
 import asyncpg
 from datetime import datetime
 
-DB_HOST = os.environ.get("PGHOST")
-DB_PORT = int(os.environ.get("PGPORT", "5432"))
-DB_NAME = os.environ.get("PGDATABASE")
-DB_USER = os.environ.get("PGUSER")
-DB_PASS = os.environ.get("PGPASSWORD")
-
+DB_HOST = os.getenv("PGHOST")
+DB_PORT = int(os.getenv("PGPORT", "5432"))
+DB_NAME = os.getenv("PGDATABASE")
+DB_USER = os.getenv("PGUSER")
+DB_PASS = os.getenv("PGPASSWORD")
 
 async def get_pool():
     return await asyncpg.create_pool(
@@ -18,7 +17,7 @@ async def get_pool():
         user=DB_USER,
         password=DB_PASS,
         min_size=1,
-        max_size=10,
+        max_size=10
     )
 
 # Users
@@ -27,8 +26,7 @@ async def ensure_user(pool, user_id: int, first_name: str):
         await conn.execute("""
             INSERT INTO users (user_id, first_name)
             VALUES ($1, $2)
-            ON CONFLICT (user_id) DO UPDATE
-            SET first_name = EXCLUDED.first_name
+            ON CONFLICT (user_id) DO UPDATE SET first_name=EXCLUDED.first_name
         """, user_id, first_name)
 
 async def get_user_by_id(pool, user_id: int):
@@ -41,10 +39,9 @@ async def add_card(pool, anime, character, rarity, file_id, uploader_user_id=Non
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO cards (anime, character, rarity, file_id, uploader_user_id)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id
+            VALUES ($1,$2,$3,$4,$5) RETURNING id
         """, anime, character, rarity, file_id, uploader_user_id)
-        return row['id']
+        return row["id"]
 
 async def get_card_by_id(pool, card_id):
     async with pool.acquire() as conn:
@@ -53,11 +50,18 @@ async def get_card_by_id(pool, card_id):
 
 async def get_all_cards(pool):
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM cards")
+        rows = await conn.fetch("SELECT * FROM cards ORDER BY id")
+        return [dict(r) for r in rows]
+
+async def get_cards_by_ids(pool, ids):
+    if not ids:
+        return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM cards WHERE id = ANY($1::int[])", ids)
         return [dict(r) for r in rows]
 
 async def update_card(pool, card_id, field, value):
-    allowed = ['anime', 'character', 'rarity', 'file_id']
+    allowed = {"anime","character","rarity","file_id"}
     if field not in allowed:
         raise ValueError("Invalid field")
     async with pool.acquire() as conn:
@@ -69,33 +73,23 @@ async def delete_card(pool, card_id):
         await conn.execute("DELETE FROM active_drops WHERE card_id=$1", card_id)
         await conn.execute("DELETE FROM cards WHERE id=$1", card_id)
 
-async def search_cards_by_text(pool, query):
-    q = f"%{query.lower()}%"
+async def search_cards_by_text(pool, qtext):
+    q = f"%{qtext.lower()}%"
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT id, anime, character, rarity, file_id FROM cards WHERE LOWER(character) LIKE $1 OR LOWER(anime) LIKE $2", q, q)
         return [dict(r) for r in rows]
 
-async def get_cards_by_ids(pool, ids: list):
-    if not ids:
-        return []
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM cards WHERE id = ANY($1::int[])", ids)
-        return [dict(r) for r in rows]
-
-# owners
+# Owners
 async def get_card_owners(pool, card_id, limit=5):
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT u.user_id, u.first_name, uc.quantity
-            FROM user_cards uc
-            JOIN users u ON u.user_id = uc.user_id
-            WHERE uc.card_id=$1
-            ORDER BY uc.quantity DESC
-            LIMIT $2
+            FROM user_cards uc JOIN users u ON u.user_id = uc.user_id
+            WHERE uc.card_id=$1 ORDER BY uc.quantity DESC LIMIT $2
         """, card_id, limit)
         return [dict(r) for r in rows]
 
-# Daily catch
+# Catch (daily)
 async def get_today_catch(pool, user_id, update=False):
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT last_catch FROM users WHERE user_id=$1", user_id)
@@ -109,35 +103,31 @@ async def get_today_catch(pool, user_id, update=False):
             last = datetime.fromisoformat(last)
         if last.date() == today:
             return True
-        else:
-            if update:
-                await conn.execute("UPDATE users SET last_catch=$1 WHERE user_id=$2", datetime.utcnow(), user_id)
-            return False
+        if update:
+            await conn.execute("UPDATE users SET last_catch=$1 WHERE user_id=$2", datetime.utcnow(), user_id)
+        return False
 
-# User inventory
+# Inventory
 async def give_card_to_user(pool, user_id, card_id, qty=1):
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT id, quantity FROM user_cards WHERE user_id=$1 AND card_id=$2", user_id, card_id)
         if row:
             await conn.execute("UPDATE user_cards SET quantity=quantity+$1 WHERE id=$2", qty, row['id'])
         else:
-            await conn.execute("INSERT INTO user_cards (user_id, card_id, quantity) VALUES ($1, $2, $3)", user_id, card_id, qty)
-
-async def add_card_to_user(pool, user_id, card_id):
-    await give_card_to_user(pool, user_id, card_id, qty=1)
-    await get_today_catch(pool, user_id, update=True)
+            await conn.execute("INSERT INTO user_cards (user_id, card_id, quantity) VALUES ($1,$2,$3)", user_id, card_id, qty)
 
 async def get_user_cards(pool, user_id):
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT id, card_id, quantity FROM user_cards WHERE user_id=$1", user_id)
         return [{"card_id": r["card_id"], "quantity": r["quantity"]} for r in rows]
 
+# update full inventory (used by some admin flows)
 async def update_user_cards(pool, user_id, cards_list):
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("DELETE FROM user_cards WHERE user_id=$1", user_id)
             for c in cards_list:
-                await conn.execute("INSERT INTO user_cards (user_id, card_id, quantity) VALUES ($1, $2, $3)", user_id, c['card_id'], c['quantity'])
+                await conn.execute("INSERT INTO user_cards (user_id, card_id, quantity) VALUES ($1,$2,$3)", user_id, c['card_id'], c['quantity'])
 
 async def update_last_catch(pool, user_id, timestamp):
     async with pool.acquire() as conn:
@@ -146,7 +136,7 @@ async def update_last_catch(pool, user_id, timestamp):
 # Groups
 async def register_group(pool, chat_id, title):
     async with pool.acquire() as conn:
-        await conn.execute("INSERT INTO groups (chat_id, title) VALUES ($1, $2) ON CONFLICT (chat_id) DO UPDATE SET title=EXCLUDED.title", chat_id, title)
+        await conn.execute("INSERT INTO groups (chat_id, title) VALUES ($1,$2) ON CONFLICT (chat_id) DO UPDATE SET title=EXCLUDED.title", chat_id, title)
 
 async def get_all_groups(pool):
     async with pool.acquire() as conn:
