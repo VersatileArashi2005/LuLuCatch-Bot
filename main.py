@@ -25,7 +25,7 @@ from telegram.ext import (
 )
 
 from config import Config
-from db import db, init_db
+from db import db, init_db, get_global_stats, get_user_collection_stats
 from utils.logger import (
     app_logger,
     error_logger,
@@ -33,6 +33,30 @@ from utils.logger import (
     log_startup,
     log_shutdown,
     log_webhook,
+)
+
+# ============================================================
+# 📦 Import Handlers
+# ============================================================
+
+from handlers.upload import (
+    upload_conversation_handler,
+    quick_upload_handler,
+)
+from handlers.admin import (
+    admin_command_handler,
+    broadcast_conversation_handler,
+    admin_callback_handler,
+    stats_command_handler,
+    ban_command_handler,
+    unban_command_handler,
+    set_bot_start_time,
+)
+from handlers.catch import (
+    catch_command_handler,
+    catch_callback_handler,
+    force_spawn_handler,
+    name_guess_message_handler,
 )
 
 
@@ -64,58 +88,8 @@ async def setup_bot() -> Application:
     set_bot_start_time()
     
     # ========================================
-    # Register Conversation Handlers (MUST BE FIRST)
+    # Define Basic Command Handlers
     # ========================================
-    
-    # Upload conversation handler
-    application.add_handler(upload_conversation_handler)
-    
-    # Broadcast conversation handler  
-    application.add_handler(broadcast_conversation_handler)
-
-    # ========================================
-    # Register Command Handlers
-    # ========================================
-    
-# Basic commands (keep your existing ones)
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("info", info_command))
-    application.add_handler(CommandHandler("help", start_command))
-    
-# Catch commands
-    application.add_handler(catch_command_handler)
-application.add_handler(force_spawn_handler)
-
-# Admin commands
-
-    application.add_handler(admin_command_handler)
-    application.add_handler(stats_command_handler)
-    application.add_handler(ban_command_handler)
-    application.add_handler(unban_command_handler)
-    application.add_handler(quick_upload_handler)
-    
-    # ========================================
-    # Register Callback Query Handlers
-    # ========================================
-    
-    # Admin panel callbacks
-    application.add_handler(CallbackQueryHandler(
-        admin_callback_handler,
-        pattern=r"^admin_"
-    ))
-    
-    # Catch callbacks
-    application.add_handler(CallbackQueryHandler(
-        catch_callback_handler,
-        pattern=r"^(catch_|skip_|expired)"
-    ))
-    
-    # ========================================
-    # Register Message Handlers
-    # ========================================
-
-    # Name guessing in groups
-    application.add_handler(name_guess_message_handler)
     
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handler for /start command."""
@@ -136,8 +110,6 @@ application.add_handler(force_spawn_handler)
     
     async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handler for /info command."""
-        from db import get_global_stats
-        
         stats = await get_global_stats(None)
         
         await update.message.reply_text(
@@ -161,8 +133,6 @@ application.add_handler(force_spawn_handler)
     
     async def harem_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handler for /harem command - placeholder."""
-        from db import get_user_collection_stats
-        
         user_id = update.effective_user.id
         stats = await get_user_collection_stats(None, user_id)
         
@@ -176,50 +146,9 @@ application.add_handler(force_spawn_handler)
             parse_mode="Markdown"
         )
     
-    async def catch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handler for /catch command - placeholder."""
-        await update.message.reply_text(
-            "🎯 *Catch Command*\n\n"
-            "Wait for a card to spawn, then use /catch to catch it!\n"
-            "You can also type the character's name.",
-            parse_mode="Markdown"
-        )
-    
-    async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handler for /upload command - admin only placeholder."""
-        if not Config.is_admin(update.effective_user.id):
-            await update.message.reply_text("❌ This command is for admins only.")
-            return
-        
-        await update.message.reply_text(
-            "📤 *Upload Command*\n\n"
-            "Reply to a photo with:\n"
-            "`/upload <anime> | <character> | <rarity>`\n\n"
-            "Example:\n"
-            "`/upload Naruto | Naruto Uzumaki | 4`",
-            parse_mode="Markdown"
-        )
-    
-    async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handler for /admin command - admin only placeholder."""
-        if not Config.is_admin(update.effective_user.id):
-            await update.message.reply_text("❌ This command is for admins only.")
-            return
-        
-        await update.message.reply_text(
-            "👑 *Admin Panel*\n\n"
-            "• `/upload` - Upload new cards\n"
-            "• `/broadcast` - Send message to all users\n"
-            "• `/stats` - View detailed statistics\n"
-            "• `/ban` - Ban a user\n"
-            "• `/unban` - Unban a user",
-            parse_mode="Markdown"
-        )
-    
     async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handler for inline queries - placeholder."""
         query = update.inline_query.query
-        # Inline results will be implemented in Part 2
         await update.inline_query.answer(
             results=[],
             cache_time=10,
@@ -234,7 +163,6 @@ application.add_handler(force_spawn_handler)
             exc_info=context.error
         )
         
-        # Send error message to user if possible
         if isinstance(update, Update) and update.effective_message:
             try:
                 await update.effective_message.reply_text(
@@ -245,26 +173,69 @@ application.add_handler(force_spawn_handler)
                 pass
     
     # ========================================
-    # Add Handlers to Application
+    # Register Conversation Handlers (MUST BE FIRST)
     # ========================================
     
+    application.add_handler(upload_conversation_handler)
+    application.add_handler(broadcast_conversation_handler)
+    
+    # ========================================
+    # Register Command Handlers
+    # ========================================
+    
+    # Basic commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("info", info_command))
+    application.add_handler(CommandHandler("help", start_command))
     application.add_handler(CommandHandler("check", check_command))
     application.add_handler(CommandHandler("harem", harem_command))
-    application.add_handler(CommandHandler("catch", catch_command))
-    application.add_handler(CommandHandler("upload", upload_command))
-    application.add_handler(CommandHandler("admin", admin_command))
     
-    # Inline query handler
+    # Catch commands
+    application.add_handler(catch_command_handler)
+    application.add_handler(force_spawn_handler)
+    
+    # Admin commands
+    application.add_handler(admin_command_handler)
+    application.add_handler(stats_command_handler)
+    application.add_handler(ban_command_handler)
+    application.add_handler(unban_command_handler)
+    application.add_handler(quick_upload_handler)
+    
+    # ========================================
+    # Register Callback Query Handlers
+    # ========================================
+    
+    application.add_handler(CallbackQueryHandler(
+        admin_callback_handler,
+        pattern=r"^admin_"
+    ))
+    
+    application.add_handler(CallbackQueryHandler(
+        catch_callback_handler,
+        pattern=r"^(catch_|skip_|expired)"
+    ))
+    
+    # ========================================
+    # Register Message Handlers
+    # ========================================
+    
+    application.add_handler(name_guess_message_handler)
+    
+    # ========================================
+    # Inline Query Handler
+    # ========================================
+    
     if Config.ENABLE_INLINE_MODE:
         application.add_handler(InlineQueryHandler(inline_query_handler))
     
-    # Error handler
+    # ========================================
+    # Error Handler
+    # ========================================
+    
     application.add_error_handler(error_handler)
     
     # ========================================
-    # Set Bot Commands (Menu)
+    # Set Bot Commands Menu
     # ========================================
     
     commands = [
@@ -335,7 +306,6 @@ async def lifespan(app: FastAPI):
     else:
         # Use polling mode (for local development)
         log_startup("⚠️ No webhook URL configured, using polling mode")
-        # Start polling in background task
         asyncio.create_task(bot_app.updater.start_polling(drop_pending_updates=True))
     
     log_startup("🎴 LuLuCatch Bot is now running!")
@@ -347,7 +317,6 @@ async def lifespan(app: FastAPI):
     # ========================================
     log_shutdown("Shutting down LuLuCatch Bot...")
     
-    # Stop the bot
     if bot_app:
         if Config.WEBHOOK_URL:
             await bot_app.bot.delete_webhook()
@@ -356,7 +325,6 @@ async def lifespan(app: FastAPI):
         await bot_app.stop()
         await bot_app.shutdown()
     
-    # Close database connection
     await db.disconnect()
     
     log_shutdown("✅ LuLuCatch Bot shutdown complete")
@@ -404,9 +372,6 @@ async def health_check():
 async def webhook_handler(request: Request) -> Response:
     """
     Webhook endpoint for receiving Telegram updates.
-    
-    This endpoint receives updates from Telegram and passes them
-    to the bot application for processing.
     """
     global bot_app
     
@@ -428,26 +393,19 @@ async def webhook_handler(request: Request) -> Response:
         )
     
     try:
-        # Parse the update from request body
         update_data = await request.json()
         update = Update.de_json(update_data, bot_app.bot)
-        
-        # Process the update
         await bot_app.process_update(update)
-        
         return Response(status_code=status.HTTP_200_OK)
         
     except Exception as e:
         error_logger.error(f"Error processing webhook update: {e}", exc_info=True)
-        # Return 200 to prevent Telegram from retrying
         return Response(status_code=status.HTTP_200_OK)
 
 
 @app.get("/stats")
 async def get_stats():
     """Get bot statistics (public endpoint)."""
-    from db import get_global_stats
-    
     stats = await get_global_stats(None)
     
     return {
@@ -465,14 +423,11 @@ async def get_stats():
 def main():
     """
     Main entry point for running the application.
-    Can be run directly or via uvicorn.
     """
-    # Set up logging
     setup_logging(debug=Config.DEBUG)
     
     log_startup("Initializing LuLuCatch Card Bot...")
     
-    # Run the FastAPI app with uvicorn
     uvicorn.run(
         "main:app",
         host=Config.HOST,
