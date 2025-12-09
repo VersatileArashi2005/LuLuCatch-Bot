@@ -1,6 +1,21 @@
+# ============================================================
+# 📁 File: requirements.txt
+# 📍 Location: telegram_card_bot/requirements.txt
+# 📝 Description: Python dependencies for the card bot
+# ============================================================
+
+# Telegram Bot
 python-telegram-bot[webhooks]==20.7
+
+# Web Framework
 fastapi==0.109.0
-uvicorn==0.25.0
+uvicorn[standard]==0.27.0
+
+# Database
 asyncpg==0.29.0
+
+# Environment
 python-dotenv==1.0.0
-aiohttp==3.9.1
+
+# Optional: For development
+httpx==0.26.0
