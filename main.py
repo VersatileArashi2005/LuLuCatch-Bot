@@ -88,7 +88,7 @@ application.add_handler(force_spawn_handler)
 
 # Admin commands
 
-   application.add_handler(admin_command_handler)
+    application.add_handler(admin_command_handler)
     application.add_handler(stats_command_handler)
     application.add_handler(ban_command_handler)
     application.add_handler(unban_command_handler)
