@@ -1,5 +1,5 @@
 python-telegram-bot==20.8
-fastapi==0.104.0
-uvicorn==0.25.0
-asyncpg==1.0.2
-pydantic==2.6.0
+fastapi
+uvicorn
+asyncpg
+pydantic
