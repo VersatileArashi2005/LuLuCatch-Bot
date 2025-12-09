@@ -22,6 +22,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     filters,
+    Defaults,
 )
 
 from config import Config
