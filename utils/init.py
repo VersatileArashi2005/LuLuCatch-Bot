@@ -1,19 +1,29 @@
-"""Utils package initialization."""
-from .logger import logger
-from .rarity import RARITIES, rarity_to_text, get_random_rarity
-from .keyboards import Keyboards
-from .helpers import format_card_preview, format_card_detail, format_catch_message
-from .stages import StageManager, Stages
+# ============================================================
+# 📁 File: utils/__init__.py
+# 📍 Location: telegram_card_bot/utils/__init__.py
+# 📝 Description: Utils package initialization
+# ============================================================
+
+from .logger import app_logger, error_logger, setup_logging
+from .rarity import (
+    RARITY_TABLE,
+    rarity_to_text,
+    get_random_rarity,
+    get_rarity_emoji,
+    get_rarity_name,
+    get_all_rarities
+)
 
 __all__ = [
-    'logger', 
-    'RARITIES', 
-    'rarity_to_text', 
-    'get_random_rarity',
-    'Keyboards',
-    'format_card_preview',
-    'format_card_detail',
-    'format_catch_message',
-    'StageManager',
-    'Stages'
+    # Logger exports
+    "app_logger",
+    "error_logger", 
+    "setup_logging",
+    # Rarity exports
+    "RARITY_TABLE",
+    "rarity_to_text",
+    "get_random_rarity",
+    "get_rarity_emoji",
+    "get_rarity_name",
+    "get_all_rarities",
 ]
