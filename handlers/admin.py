@@ -6,13 +6,12 @@
 
 import asyncio
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    Message,
 )
 from telegram.ext import (
     ContextTypes,
@@ -51,12 +50,7 @@ def set_bot_start_time() -> None:
 
 
 def get_uptime() -> str:
-    """
-    Get formatted bot uptime string.
-    
-    Returns:
-        Formatted uptime string (e.g., "2d 5h 30m 15s")
-    """
+    """Get formatted bot uptime string."""
     if _bot_start_time is None:
         return "Unknown"
     
@@ -87,28 +81,12 @@ set_bot_start_time()
 # ============================================================
 
 def is_admin(user_id: int) -> bool:
-    """
-    Check if a user is an admin.
-    
-    Args:
-        user_id: Telegram user ID to check
-        
-    Returns:
-        True if user is admin, False otherwise
-    """
+    """Check if a user is an admin."""
     return Config.is_admin(user_id)
 
 
 async def check_admin(update: Update) -> bool:
-    """
-    Check if the update is from an admin. Sends error if not.
-    
-    Args:
-        update: Telegram update
-        
-    Returns:
-        True if admin, False otherwise (also sends message)
-    """
+    """Check if the update is from an admin. Sends error if not."""
     user = update.effective_user
     
     if not is_admin(user.id):
@@ -138,9 +116,7 @@ async def check_admin(update: Update) -> bool:
 # ============================================================
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle /admin command - Show admin panel.
-    """
+    """Handle /admin command - Show admin panel."""
     user = update.effective_user
     log_command(user.id, "admin", update.effective_chat.id)
     
@@ -148,9 +124,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not await check_admin(update):
         return
     
-    # ========================================
     # Build admin panel keyboard
-    # ========================================
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📊 Statistics", callback_data="admin_stats"),
@@ -173,9 +147,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         ],
     ])
     
-    # ========================================
     # Send admin panel
-    # ========================================
     await update.message.reply_text(
         "👑 *Admin Control Panel*\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -192,9 +164,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle admin panel callback queries.
-    """
+    """Handle admin panel callback queries."""
     query = update.callback_query
     user = query.from_user
     data = query.data
@@ -206,9 +176,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     
     await query.answer()
     
-    # ========================================
     # Statistics
-    # ========================================
     if data == "admin_stats":
         stats = await get_global_stats(None)
         
@@ -230,14 +198,11 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
     
-    # ========================================
     # Cards Info
-    # ========================================
     elif data == "admin_cards":
         total_cards = await get_card_count(None)
         distribution = await get_rarity_distribution(None)
         
-        # Build distribution text
         dist_lines = []
         for row in distribution:
             rarity_id = row["rarity"]
@@ -258,15 +223,12 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📤 Upload Card", callback_data="admin_upload_prompt")],
             [InlineKeyboardButton("⬅️ Back", callback_data="admin_back")],
         ])
         
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
     
-    # ========================================
     # Users Info
-    # ========================================
     elif data == "admin_users":
         stats = await get_global_stats(None)
         
@@ -286,9 +248,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
     
-    # ========================================
     # Groups Info
-    # ========================================
     elif data == "admin_groups":
         groups = await get_all_groups(None, active_only=True)
         
@@ -317,9 +277,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
     
-    # ========================================
     # Broadcast
-    # ========================================
     elif data == "admin_broadcast":
         text = (
             "📢 *Broadcast Message*\n\n"
@@ -335,12 +293,9 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
     
-    # ========================================
     # Reload DB
-    # ========================================
     elif data == "admin_reload":
         try:
-            # Perform a simple health check as "reload"
             is_healthy = await health_check(None)
             
             if is_healthy:
@@ -366,9 +321,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
     
-    # ========================================
     # Health Check
-    # ========================================
     elif data == "admin_health":
         is_healthy = await health_check(None)
         
@@ -388,9 +341,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
     
-    # ========================================
     # Uptime
-    # ========================================
     elif data == "admin_uptime":
         uptime = get_uptime()
         
@@ -409,9 +360,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
     
-    # ========================================
     # Back to main panel
-    # ========================================
     elif data == "admin_back":
         keyboard = InlineKeyboardMarkup([
             [
@@ -447,25 +396,11 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=keyboard
         )
     
-    # ========================================
     # Close panel
-    # ========================================
     elif data == "admin_close":
         await query.edit_message_text(
             "👑 *Admin Panel Closed*\n\n"
             "Use /admin to open again.",
-            parse_mode="Markdown"
-        )
-    
-    # ========================================
-    # Upload prompt
-    # ========================================
-    elif data == "admin_upload_prompt":
-        await query.edit_message_text(
-            "📤 *Upload Cards*\n\n"
-            "Use the /upload command in private chat to upload new cards.\n\n"
-            "Quick upload: Reply to a photo with:\n"
-            "`/quickupload Anime | Character | Rarity`",
             parse_mode="Markdown"
         )
 
@@ -474,13 +409,11 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 # 📢 Broadcast System
 # ============================================================
 
-BROADCAST_MESSAGE = 0  # Conversation state
+BROADCAST_MESSAGE = 0
 
 
 async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    Handle /broadcast command - Start broadcast flow.
-    """
+    """Handle /broadcast command - Start broadcast flow."""
     user = update.effective_user
     log_command(user.id, "broadcast", update.effective_chat.id)
     
@@ -494,39 +427,29 @@ async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if message_text:
         # Direct broadcast with message
         context.user_data["broadcast_message"] = message_text
-        return await broadcast_confirm(update, context)
+        return await broadcast_execute(update, context)
     
     # Ask for message
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("❌ Cancel", callback_data="broadcast_cancel")]
-    ])
-    
     await update.message.reply_text(
         "📢 *Broadcast Message*\n\n"
         "Send the message you want to broadcast to all users.\n\n"
         "⚠️ This will send to ALL registered users.\n\n"
         "Type your message or /cancel to abort:",
-        parse_mode="Markdown",
-        reply_markup=keyboard
+        parse_mode="Markdown"
     )
     
     return BROADCAST_MESSAGE
 
 
 async def broadcast_message_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    Handle broadcast message input.
-    """
+    """Handle broadcast message input."""
     message_text = update.message.text
     context.user_data["broadcast_message"] = message_text
-    
-    return await broadcast_confirm(update, context)
+    return await broadcast_execute(update, context)
 
 
-async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    Confirm and send the broadcast.
-    """
+async def broadcast_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Execute the broadcast."""
     message_text = context.user_data.get("broadcast_message", "")
     user = update.effective_user
     
@@ -551,9 +474,7 @@ async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Send confirmation
     confirm_msg = await update.message.reply_text(
         f"📢 *Broadcasting...*\n\n"
-        f"Sending to {total_users} users...\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"*Message Preview:*\n{message_text[:200]}{'...' if len(message_text) > 200 else ''}",
+        f"Sending to {total_users} users...",
         parse_mode="Markdown"
     )
     
@@ -580,7 +501,6 @@ async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await asyncio.sleep(1)
                 
         except Forbidden:
-            # User blocked the bot
             blocked_count += 1
         except TelegramError as e:
             fail_count += 1
@@ -610,25 +530,15 @@ async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    Cancel broadcast.
-    """
-    if update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
-            "❌ *Broadcast Cancelled*",
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text(
-            "❌ *Broadcast Cancelled*",
-            parse_mode="Markdown"
-        )
-    
+    """Cancel broadcast."""
+    await update.message.reply_text(
+        "❌ *Broadcast Cancelled*",
+        parse_mode="Markdown"
+    )
     return ConversationHandler.END
 
 
-# Broadcast conversation handler
+# Broadcast conversation handler (no CallbackQueryHandler inside)
 broadcast_conversation_handler = ConversationHandler(
     entry_points=[
         CommandHandler("broadcast", broadcast_start),
@@ -636,10 +546,6 @@ broadcast_conversation_handler = ConversationHandler(
     states={
         BROADCAST_MESSAGE: [
             MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_message_received),
-            CallbackQueryHandler(
-                lambda u, c: broadcast_cancel(u, c),
-                pattern="^broadcast_cancel$"
-            ),
         ],
     },
     fallbacks=[
@@ -654,9 +560,7 @@ broadcast_conversation_handler = ConversationHandler(
 # ============================================================
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle /stats command - Quick stats view.
-    """
+    """Handle /stats command - Quick stats view."""
     user = update.effective_user
     
     if not is_admin(user.id):
@@ -677,10 +581,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle /ban command - Ban a user.
-    Usage: /ban <user_id> [reason]
-    """
+    """Handle /ban command - Ban a user."""
     user = update.effective_user
     
     if not is_admin(user.id):
@@ -705,7 +606,6 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     reason = " ".join(args[1:]) if len(args) > 1 else "No reason provided"
     
-    # Ban user in database
     try:
         await db.execute(
             "UPDATE users SET is_banned = TRUE, ban_reason = $2 WHERE user_id = $1",
@@ -727,10 +627,7 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle /unban command - Unban a user.
-    Usage: /unban <user_id>
-    """
+    """Handle /unban command - Unban a user."""
     user = update.effective_user
     
     if not is_admin(user.id):
