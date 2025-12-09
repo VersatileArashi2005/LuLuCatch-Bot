@@ -646,6 +646,7 @@ broadcast_conversation_handler = ConversationHandler(
         CommandHandler("cancel", broadcast_cancel),
     ],
     conversation_timeout=120,
+    per_message=True,
 )
 
 
