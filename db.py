@@ -1432,3 +1432,638 @@ CREATE TRIGGER trigger_update_trade_timestamp
     BEFORE UPDATE ON trades
     FOR EACH ROW
     EXECUTE FUNCTION update_trade_timestamp();
+
+# ============================================================
+# 📦 PART 4: Additional DB Helper Functions
+# Add these to the END of your db.py file
+# ============================================================
+
+# ============================================================
+# 📦 Collection Functions (Enhanced)
+# ============================================================
+
+async def get_collection_cards(
+    pool: Optional[Pool],
+    user_id: int,
+    offset: int = 0,
+    limit: int = 10,
+    rarity_filter: Optional[int] = None
+) -> List[Record]:
+    """
+    Get a user's collection cards with pagination.
+    Returns full card details joined with collection data.
+    
+    Args:
+        pool: Database pool
+        user_id: User ID
+        offset: Pagination offset
+        limit: Number of cards to return
+        rarity_filter: Optional rarity filter
+        
+    Returns:
+        List of card records with collection info
+    """
+    if not db.is_connected:
+        return []
+    
+    try:
+        if rarity_filter:
+            query = """
+                SELECT 
+                    c.collection_id,
+                    c.user_id,
+                    c.card_id,
+                    c.quantity,
+                    c.caught_at,
+                    c.is_favorite,
+                    ca.anime,
+                    ca.character_name,
+                    ca.rarity,
+                    ca.photo_file_id,
+                    ca.total_caught
+                FROM collections c
+                JOIN cards ca ON c.card_id = ca.card_id
+                WHERE c.user_id = $1 
+                  AND ca.is_active = TRUE 
+                  AND ca.rarity = $4
+                  AND c.quantity > 0
+                ORDER BY ca.rarity DESC, ca.character_name ASC
+                LIMIT $2 OFFSET $3
+            """
+            return await db.fetch(query, user_id, limit, offset, rarity_filter)
+        else:
+            query = """
+                SELECT 
+                    c.collection_id,
+                    c.user_id,
+                    c.card_id,
+                    c.quantity,
+                    c.caught_at,
+                    c.is_favorite,
+                    ca.anime,
+                    ca.character_name,
+                    ca.rarity,
+                    ca.photo_file_id,
+                    ca.total_caught
+                FROM collections c
+                JOIN cards ca ON c.card_id = ca.card_id
+                WHERE c.user_id = $1 
+                  AND ca.is_active = TRUE
+                  AND c.quantity > 0
+                ORDER BY ca.rarity DESC, ca.character_name ASC
+                LIMIT $2 OFFSET $3
+            """
+            return await db.fetch(query, user_id, limit, offset)
+    except Exception as e:
+        error_logger.error(f"Error getting collection cards: {e}", exc_info=True)
+        return []
+
+
+async def get_collection_count(
+    pool: Optional[Pool],
+    user_id: int,
+    rarity_filter: Optional[int] = None
+) -> int:
+    """
+    Get total count of cards in a user's collection.
+    
+    Args:
+        pool: Database pool
+        user_id: User ID
+        rarity_filter: Optional rarity filter
+        
+    Returns:
+        Total count of unique cards owned
+    """
+    if not db.is_connected:
+        return 0
+    
+    try:
+        if rarity_filter:
+            query = """
+                SELECT COUNT(*) FROM collections c
+                JOIN cards ca ON c.card_id = ca.card_id
+                WHERE c.user_id = $1 
+                  AND ca.is_active = TRUE 
+                  AND ca.rarity = $2
+                  AND c.quantity > 0
+            """
+            result = await db.fetchval(query, user_id, rarity_filter)
+        else:
+            query = """
+                SELECT COUNT(*) FROM collections c
+                JOIN cards ca ON c.card_id = ca.card_id
+                WHERE c.user_id = $1 
+                  AND ca.is_active = TRUE
+                  AND c.quantity > 0
+            """
+            result = await db.fetchval(query, user_id)
+        
+        return result or 0
+    except Exception as e:
+        error_logger.error(f"Error getting collection count: {e}", exc_info=True)
+        return 0
+
+
+async def get_card_with_details(
+    pool: Optional[Pool],
+    card_id: int
+) -> Optional[Record]:
+    """
+    Get card with full details including catch statistics.
+    
+    Args:
+        pool: Database pool
+        card_id: Card ID
+        
+    Returns:
+        Card record with details
+    """
+    if not db.is_connected:
+        return None
+    
+    try:
+        query = """
+            SELECT 
+                c.*,
+                (SELECT COUNT(DISTINCT user_id) FROM collections WHERE card_id = c.card_id AND quantity > 0) as unique_owners,
+                (SELECT COALESCE(SUM(quantity), 0) FROM collections WHERE card_id = c.card_id) as total_in_circulation
+            FROM cards c
+            WHERE c.card_id = $1 AND c.is_active = TRUE
+        """
+        return await db.fetchrow(query, card_id)
+    except Exception as e:
+        error_logger.error(f"Error getting card details: {e}", exc_info=True)
+        return None
+
+
+async def get_card_owners(
+    pool: Optional[Pool],
+    card_id: int,
+    limit: int = 5
+) -> List[Record]:
+    """
+    Get top owners of a specific card.
+    
+    Args:
+        pool: Database pool
+        card_id: Card ID to look up
+        limit: Maximum number of owners to return
+        
+    Returns:
+        List of user records who own this card
+    """
+    if not db.is_connected:
+        return []
+    
+    try:
+        query = """
+            SELECT 
+                u.user_id, 
+                u.first_name, 
+                u.username, 
+                c.quantity,
+                c.caught_at,
+                c.is_favorite
+            FROM collections c
+            JOIN users u ON c.user_id = u.user_id
+            WHERE c.card_id = $1 AND c.quantity > 0
+            ORDER BY c.quantity DESC, c.caught_at ASC
+            LIMIT $2
+        """
+        return await db.fetch(query, card_id, limit)
+    except Exception as e:
+        error_logger.error(f"Error getting card owners: {e}", exc_info=True)
+        return []
+
+
+async def check_user_owns_card(
+    pool: Optional[Pool],
+    user_id: int,
+    card_id: int,
+    min_quantity: int = 1
+) -> bool:
+    """
+    Check if a user owns at least min_quantity of a card.
+    
+    Args:
+        pool: Database pool
+        user_id: User ID
+        card_id: Card ID
+        min_quantity: Minimum quantity required
+        
+    Returns:
+        True if user owns enough of the card
+    """
+    if not db.is_connected:
+        return False
+    
+    try:
+        query = """
+            SELECT quantity FROM collections
+            WHERE user_id = $1 AND card_id = $2
+        """
+        result = await db.fetchval(query, user_id, card_id)
+        return (result or 0) >= min_quantity
+    except Exception as e:
+        error_logger.error(f"Error checking card ownership: {e}", exc_info=True)
+        return False
+
+
+async def get_user_card_quantity(
+    pool: Optional[Pool],
+    user_id: int,
+    card_id: int
+) -> int:
+    """
+    Get how many of a specific card a user owns.
+    
+    Args:
+        pool: Database pool
+        user_id: User ID
+        card_id: Card ID
+        
+    Returns:
+        Quantity owned (0 if none)
+    """
+    if not db.is_connected:
+        return 0
+    
+    try:
+        query = "SELECT quantity FROM collections WHERE user_id = $1 AND card_id = $2"
+        result = await db.fetchval(query, user_id, card_id)
+        return result or 0
+    except Exception as e:
+        error_logger.error(f"Error getting card quantity: {e}", exc_info=True)
+        return 0
+
+
+# ============================================================
+# 🔄 Trade Functions
+# ============================================================
+
+async def create_trade(
+    pool: Optional[Pool],
+    from_user_id: int,
+    to_user_id: int,
+    offered_card_id: int,
+    requested_card_id: Optional[int] = None,
+    message: Optional[str] = None
+) -> Optional[int]:
+    """
+    Create a new trade request.
+    
+    Args:
+        pool: Database pool
+        from_user_id: User offering the trade
+        to_user_id: User receiving the trade request
+        offered_card_id: Card being offered
+        requested_card_id: Card being requested (optional)
+        message: Optional message with trade
+        
+    Returns:
+        Trade ID if created, None on error
+    """
+    if not db.is_connected:
+        return None
+    
+    # Validate: can't trade with yourself
+    if from_user_id == to_user_id:
+        return None
+    
+    try:
+        query = """
+            INSERT INTO trades (from_user_id, to_user_id, offered_card_id, requested_card_id, message, status)
+            VALUES ($1, $2, $3, $4, $5, 'pending')
+            RETURNING trade_id
+        """
+        result = await db.fetchval(query, from_user_id, to_user_id, offered_card_id, requested_card_id, message)
+        return result
+    except Exception as e:
+        error_logger.error(f"Error creating trade: {e}", exc_info=True)
+        return None
+
+
+async def get_trade(
+    pool: Optional[Pool],
+    trade_id: int
+) -> Optional[Record]:
+    """
+    Get a trade by ID with full details.
+    
+    Args:
+        pool: Database pool
+        trade_id: Trade ID
+        
+    Returns:
+        Trade record with card and user details
+    """
+    if not db.is_connected:
+        return None
+    
+    try:
+        query = """
+            SELECT 
+                t.*,
+                fu.first_name as from_user_name,
+                fu.username as from_username,
+                tu.first_name as to_user_name,
+                tu.username as to_username,
+                oc.character_name as offered_character,
+                oc.anime as offered_anime,
+                oc.rarity as offered_rarity,
+                oc.photo_file_id as offered_photo,
+                rc.character_name as requested_character,
+                rc.anime as requested_anime,
+                rc.rarity as requested_rarity,
+                rc.photo_file_id as requested_photo
+            FROM trades t
+            JOIN users fu ON t.from_user_id = fu.user_id
+            JOIN users tu ON t.to_user_id = tu.user_id
+            JOIN cards oc ON t.offered_card_id = oc.card_id
+            LEFT JOIN cards rc ON t.requested_card_id = rc.card_id
+            WHERE t.trade_id = $1
+        """
+        return await db.fetchrow(query, trade_id)
+    except Exception as e:
+        error_logger.error(f"Error getting trade: {e}", exc_info=True)
+        return None
+
+
+async def list_pending_trades_for_user(
+    pool: Optional[Pool],
+    user_id: int,
+    as_recipient: bool = True,
+    limit: int = 20
+) -> List[Record]:
+    """
+    List pending trades for a user.
+    
+    Args:
+        pool: Database pool
+        user_id: User ID
+        as_recipient: If True, show trades TO the user; if False, FROM the user
+        limit: Maximum trades to return
+        
+    Returns:
+        List of pending trade records
+    """
+    if not db.is_connected:
+        return []
+    
+    try:
+        if as_recipient:
+            query = """
+                SELECT 
+                    t.*,
+                    fu.first_name as from_user_name,
+                    fu.username as from_username,
+                    oc.character_name as offered_character,
+                    oc.anime as offered_anime,
+                    oc.rarity as offered_rarity,
+                    rc.character_name as requested_character,
+                    rc.anime as requested_anime,
+                    rc.rarity as requested_rarity
+                FROM trades t
+                JOIN users fu ON t.from_user_id = fu.user_id
+                JOIN cards oc ON t.offered_card_id = oc.card_id
+                LEFT JOIN cards rc ON t.requested_card_id = rc.card_id
+                WHERE t.to_user_id = $1 AND t.status = 'pending'
+                ORDER BY t.created_at DESC
+                LIMIT $2
+            """
+        else:
+            query = """
+                SELECT 
+                    t.*,
+                    tu.first_name as to_user_name,
+                    tu.username as to_username,
+                    oc.character_name as offered_character,
+                    oc.anime as offered_anime,
+                    oc.rarity as offered_rarity,
+                    rc.character_name as requested_character,
+                    rc.anime as requested_anime,
+                    rc.rarity as requested_rarity
+                FROM trades t
+                JOIN users tu ON t.to_user_id = tu.user_id
+                JOIN cards oc ON t.offered_card_id = oc.card_id
+                LEFT JOIN cards rc ON t.requested_card_id = rc.card_id
+                WHERE t.from_user_id = $1 AND t.status = 'pending'
+                ORDER BY t.created_at DESC
+                LIMIT $2
+            """
+        return await db.fetch(query, user_id, limit)
+    except Exception as e:
+        error_logger.error(f"Error listing pending trades: {e}", exc_info=True)
+        return []
+
+
+async def count_pending_trades(
+    pool: Optional[Pool],
+    user_id: int
+) -> int:
+    """
+    Count total pending trades for a user (both sent and received).
+    
+    Args:
+        pool: Database pool
+        user_id: User ID
+        
+    Returns:
+        Count of pending trades
+    """
+    if not db.is_connected:
+        return 0
+    
+    try:
+        query = """
+            SELECT COUNT(*) FROM trades
+            WHERE (from_user_id = $1 OR to_user_id = $1) AND status = 'pending'
+        """
+        result = await db.fetchval(query, user_id)
+        return result or 0
+    except Exception as e:
+        error_logger.error(f"Error counting pending trades: {e}", exc_info=True)
+        return 0
+
+
+async def update_trade_status(
+    pool: Optional[Pool],
+    trade_id: int,
+    status: str,
+    by_user_id: Optional[int] = None
+) -> bool:
+    """
+    Update a trade's status.
+    
+    Args:
+        pool: Database pool
+        trade_id: Trade ID
+        status: New status (pending, accepted, rejected, cancelled, completed, failed)
+        by_user_id: User making the update (for validation)
+        
+    Returns:
+        True if updated successfully
+    """
+    if not db.is_connected:
+        return False
+    
+    valid_statuses = {'pending', 'accepted', 'rejected', 'cancelled', 'completed', 'failed'}
+    if status not in valid_statuses:
+        return False
+    
+    try:
+        if status == 'completed':
+            query = """
+                UPDATE trades 
+                SET status = $2, completed_at = NOW()
+                WHERE trade_id = $1
+                RETURNING trade_id
+            """
+        else:
+            query = """
+                UPDATE trades 
+                SET status = $2
+                WHERE trade_id = $1
+                RETURNING trade_id
+            """
+        
+        result = await db.fetchval(query, trade_id, status)
+        return result is not None
+    except Exception as e:
+        error_logger.error(f"Error updating trade status: {e}", exc_info=True)
+        return False
+
+
+async def transfer_card_between_users(
+    pool: Optional[Pool],
+    from_user_id: int,
+    to_user_id: int,
+    card_id: int,
+    quantity: int = 1
+) -> tuple[bool, str]:
+    """
+    Atomically transfer a card from one user to another.
+    Uses transaction with row-level locking to prevent race conditions.
+    
+    Args:
+        pool: Database pool
+        from_user_id: User giving the card
+        to_user_id: User receiving the card
+        card_id: Card to transfer
+        quantity: How many to transfer (default 1)
+        
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    if not db.is_connected:
+        return False, "Database not connected"
+    
+    if from_user_id == to_user_id:
+        return False, "Cannot transfer to yourself"
+    
+    if quantity < 1:
+        return False, "Invalid quantity"
+    
+    try:
+        async with db.pool.acquire() as conn:
+            async with conn.transaction():
+                # Lock and check sender's card with FOR UPDATE
+                sender_query = """
+                    SELECT quantity FROM collections
+                    WHERE user_id = $1 AND card_id = $2
+                    FOR UPDATE
+                """
+                sender_qty = await conn.fetchval(sender_query, from_user_id, card_id)
+                
+                if sender_qty is None or sender_qty < quantity:
+                    return False, f"Insufficient cards (have: {sender_qty or 0}, need: {quantity})"
+                
+                # Decrease sender's quantity
+                new_sender_qty = sender_qty - quantity
+                
+                if new_sender_qty <= 0:
+                    # Remove the row entirely if quantity becomes 0
+                    await conn.execute(
+                        "DELETE FROM collections WHERE user_id = $1 AND card_id = $2",
+                        from_user_id, card_id
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE collections SET quantity = $3 WHERE user_id = $1 AND card_id = $2",
+                        from_user_id, card_id, new_sender_qty
+                    )
+                
+                # Add to receiver (upsert)
+                await conn.execute(
+                    """
+                    INSERT INTO collections (user_id, card_id, quantity, caught_at)
+                    VALUES ($1, $2, $3, NOW())
+                    ON CONFLICT (user_id, card_id) DO UPDATE
+                    SET quantity = collections.quantity + $3
+                    """,
+                    to_user_id, card_id, quantity
+                )
+                
+                return True, "Transfer successful"
+                
+    except Exception as e:
+        error_logger.error(f"Error transferring card: {e}", exc_info=True)
+        return False, f"Transfer failed: {str(e)}"
+
+
+async def execute_trade(
+    pool: Optional[Pool],
+    trade_id: int,
+    accepting_user_id: int
+) -> tuple[bool, str]:
+    """
+    Execute a trade (accept and transfer cards).
+    Handles both one-way gifts and two-way swaps.
+    
+    Args:
+        pool: Database pool
+        trade_id: Trade to execute
+        accepting_user_id: User accepting the trade (must be to_user_id)
+        
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    if not db.is_connected:
+        return False, "Database not connected"
+    
+    try:
+        # Get trade details
+        trade = await get_trade(None, trade_id)
+        
+        if not trade:
+            return False, "Trade not found"
+        
+        if trade["status"] != "pending":
+            return False, f"Trade is no longer pending (status: {trade['status']})"
+        
+        if trade["to_user_id"] != accepting_user_id:
+            return False, "Only the recipient can accept this trade"
+        
+        from_user_id = trade["from_user_id"]
+        to_user_id = trade["to_user_id"]
+        offered_card_id = trade["offered_card_id"]
+        requested_card_id = trade.get("requested_card_id")
+        
+        async with db.pool.acquire() as conn:
+            async with conn.transaction():
+                # Verify from_user still has the offered card
+                from_qty = await conn.fetchval(
+                    "SELECT quantity FROM collections WHERE user_id = $1 AND card_id = $2 FOR UPDATE",
+                    from_user_id, offered_card_id
+                )
+                
+                if not from_qty or from_qty < 1:
+                    await update_trade_status(None, trade_id, "failed")
+                    return False, "Offerer no longer has the offered card"
+                
+                # If this is a swap (requested_card_id exists), verify to_user has that card
+                if requested_card_id:
+                    to_qty = await conn.fetchval(
+                        "SELECT quantity FROM collections WHERE user_id = $1 AND card_id = $2 FOR UPDATE",
+                        to_user_id, requested_
