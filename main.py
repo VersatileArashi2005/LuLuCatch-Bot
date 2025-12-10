@@ -58,6 +58,12 @@ from handlers.catch import (
     name_guess_message_handler,
 )
 
+# Import inline search handlers
+from commands.inline_search import (
+    register_inline_handlers,
+    register_inline_callback_handlers,
+)
+
 
 # ============================================================
 # 🤖 Telegram Bot Application
@@ -91,12 +97,67 @@ async def setup_bot() -> Application:
     
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handler for /start command."""
-        user = update.effective_user
-        
-        if not user or not update.message:
+        if not update.message or not update.effective_user:
             return
         
+        user = update.effective_user
         db_status = "✅ Connected" if db.is_connected else "⚠️ Offline"
+        
+        # Check for start parameters
+        if context.args:
+            param = context.args[0]
+            
+            # Handle card view from inline
+            if param.startswith("card_"):
+                try:
+                    card_id = int(param.replace("card_", ""))
+                    from db import get_card_by_id
+                    card = await get_card_by_id(None, card_id)
+                    
+                    if card:
+                        from utils.rarity import rarity_to_text
+                        rarity_name, rarity_prob, rarity_emoji = rarity_to_text(card["rarity"])
+                        
+                        caption = (
+                            f"{rarity_emoji} *{card['character_name']}*\n\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🎬 *Anime:* {card['anime']}\n"
+                            f"🆔 *ID:* `#{card['card_id']}`\n"
+                            f"✨ *Rarity:* {rarity_emoji} {rarity_name}\n"
+                            f"📊 *Drop Rate:* {rarity_prob}%\n"
+                            f"━━━━━━━━━━━━━━━━━━━━"
+                        )
+                        
+                        if card.get("photo_file_id"):
+                            await update.message.reply_photo(
+                                photo=card["photo_file_id"],
+                                caption=caption,
+                                parse_mode="Markdown"
+                            )
+                        else:
+                            await update.message.reply_text(caption, parse_mode="Markdown")
+                        return
+                except Exception as e:
+                    error_logger.error(f"Error handling card start param: {e}")
+            
+            # Handle inline help
+            elif param == "inline_help" or param == "search":
+                await update.message.reply_text(
+                    "🔍 *Inline Search Help*\n\n"
+                    "Type `@" + (context.bot.username or "bot") + " ` followed by:\n\n"
+                    "• *Anime name:* `naruto`\n"
+                    "• *Character:* `itachi`\n"
+                    "• *Rarity:* `legendary` or `💎`\n"
+                    "• *Card ID:* `#42` or `42`\n\n"
+                    "Results will appear as you type!",
+                    parse_mode="Markdown"
+                )
+                return
+            
+            # Handle harem from inline
+            elif param == "harem":
+                # Redirect to harem command
+                pass  # Fall through to normal start
         
         await update.message.reply_text(
             f"🎴 *Welcome to LuLuCatch, {user.first_name}!*\n\n"
@@ -105,7 +166,10 @@ async def setup_bot() -> Application:
             f"• /start - Show this message\n"
             f"• /info - View bot information\n"
             f"• /harem - View your card collection\n"
-            f"• /catch - Catch a spawned card\n\n"
+            f"• /catch - Catch a spawned card\n"
+            f"• /check - Check card details\n\n"
+            f"🔍 *Inline Search:*\n"
+            f"Type `@{context.bot.username} ` in any chat to search cards!\n\n"
             f"🗄️ Database: {db_status}\n\n"
             f"Add me to a group to start catching cards! 🚀",
             parse_mode="Markdown"
@@ -159,7 +223,8 @@ async def setup_bot() -> Application:
             f"🎴 Total Cards: {stats['total_cards']}\n"
             f"🧿 Mythical+: {stats['mythical_plus']}\n"
             f"⚡ Legendary: {stats['legendary_count']}\n\n"
-            f"Use inline mode to browse your collection!",
+            f"🔍 Use inline mode to browse:\n"
+            f"`@{context.bot.username} naruto`",
             parse_mode="Markdown"
         )
     
@@ -168,24 +233,53 @@ async def setup_bot() -> Application:
         if not update.message:
             return
         
+        # Check if card ID is provided
+        if context.args and context.args[0].isdigit():
+            card_id = int(context.args[0])
+            
+            if db.is_connected:
+                from db import get_card_by_id
+                card = await get_card_by_id(None, card_id)
+                
+                if card:
+                    from utils.rarity import rarity_to_text
+                    rarity_name, rarity_prob, rarity_emoji = rarity_to_text(card["rarity"])
+                    
+                    caption = (
+                        f"{rarity_emoji} *{card['character_name']}*\n\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🎬 *Anime:* {card['anime']}\n"
+                        f"🆔 *ID:* `#{card['card_id']}`\n"
+                        f"✨ *Rarity:* {rarity_emoji} {rarity_name}\n"
+                        f"📊 *Drop Rate:* {rarity_prob}%\n"
+                        f"🎯 *Times Caught:* {card.get('total_caught', 0):,}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━"
+                    )
+                    
+                    if card.get("photo_file_id"):
+                        await update.message.reply_photo(
+                            photo=card["photo_file_id"],
+                            caption=caption,
+                            parse_mode="Markdown"
+                        )
+                    else:
+                        await update.message.reply_text(caption, parse_mode="Markdown")
+                    return
+                else:
+                    await update.message.reply_text(
+                        f"❌ Card `#{card_id}` not found.",
+                        parse_mode="Markdown"
+                    )
+                    return
+        
         await update.message.reply_text(
             "🔍 *Check Command*\n\n"
             "Usage: `/check <card_id>`\n"
             "View details about a specific card.\n\n"
-            "Example: `/check 1`",
+            "Example: `/check 1`\n\n"
+            "💡 You can also use inline search:\n"
+            f"`@{context.bot.username} #1`",
             parse_mode="Markdown"
-        )
-    
-    async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handler for inline queries."""
-        if not update.inline_query:
-            return
-        
-        await update.inline_query.answer(
-            results=[],
-            cache_time=10,
-            switch_pm_text="🎴 View your collection",
-            switch_pm_parameter="harem"
         )
     
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -236,7 +330,7 @@ async def setup_bot() -> Application:
     # Register Callback Query Handlers
     # ========================================
     
-    # Upload rarity selection (IMPORTANT - must be before other callbacks)
+    # Upload rarity selection
     application.add_handler(upload_rarity_callback_handler)
     
     # Admin panel callbacks
@@ -258,11 +352,11 @@ async def setup_bot() -> Application:
     application.add_handler(name_guess_message_handler)
     
     # ========================================
-    # Inline Query Handler
+    # Register Inline Search Handlers
     # ========================================
     
-    if Config.ENABLE_INLINE_MODE:
-        application.add_handler(InlineQueryHandler(inline_query_handler))
+    register_inline_handlers(application)
+    register_inline_callback_handlers(application)
     
     # ========================================
     # Error Handler
@@ -435,9 +529,6 @@ async def health_check():
 async def webhook_handler(request: Request) -> Response:
     """
     Webhook endpoint for receiving Telegram updates.
-    
-    This endpoint receives updates from Telegram and passes them
-    to the bot application for processing.
     """
     global bot_app
     
@@ -462,7 +553,7 @@ async def webhook_handler(request: Request) -> Response:
         # Parse the update from request body
         update_data = await request.json()
         
-        # Log incoming update (optional - for debugging)
+        # Log incoming update
         update_id = update_data.get("update_id", "unknown")
         app_logger.info(f"📥 Received update: {update_id}")
         
@@ -509,7 +600,6 @@ async def get_stats():
 def main():
     """
     Main entry point for running the application.
-    Can be run directly or via uvicorn.
     """
     # Set up logging
     setup_logging(debug=Config.DEBUG)
