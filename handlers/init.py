@@ -6,6 +6,7 @@
 
 from .upload import (
     upload_conversation_handler,
+    upload_rarity_callback_handler,  # NEW - separate callback handler
     quick_upload_handler,
     UPLOAD_ANIME,
     UPLOAD_CHARACTER,
@@ -32,6 +33,7 @@ from .catch import (
 __all__ = [
     # Upload exports
     "upload_conversation_handler",
+    "upload_rarity_callback_handler",
     "quick_upload_handler",
     "UPLOAD_ANIME",
     "UPLOAD_CHARACTER",
