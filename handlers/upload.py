@@ -4,8 +4,7 @@
 # 📝 Description: Card upload system with rarity selection
 # ============================================================
 
-import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, Dict, Any
 
 from telegram import (
@@ -32,7 +31,6 @@ from utils.rarity import (
     get_random_rarity,
     rarity_to_text,
     RARITY_TABLE,
-    get_all_rarities,
 )
 
 
@@ -43,7 +41,6 @@ from utils.rarity import (
 UPLOAD_ANIME = 0
 UPLOAD_CHARACTER = 1
 UPLOAD_PHOTO = 2
-UPLOAD_RARITY = 3  # New state for rarity selection
 
 
 # ============================================================
@@ -74,28 +71,34 @@ def set_upload_cooldown(user_id: int) -> None:
     _upload_cooldowns[user_id] = datetime.now()
 
 
-def clear_upload_cooldown(user_id: int) -> None:
-    """Clear the upload cooldown for a user."""
-    _upload_cooldowns.pop(user_id, None)
-
-
 # ============================================================
-# 📝 Temporary Upload Data Storage
+# 📝 Pending Uploads Storage (for rarity selection)
 # ============================================================
 
-_upload_data: Dict[int, Dict[str, Any]] = {}
+# Store pending uploads waiting for rarity selection
+# Format: {user_id: {"anime": str, "character": str, "photo_file_id": str, "message_id": int}}
+_pending_uploads: Dict[int, Dict[str, Any]] = {}
 
 
-def get_upload_data(user_id: int) -> Dict[str, Any]:
-    """Get or create upload data for a user."""
-    if user_id not in _upload_data:
-        _upload_data[user_id] = {}
-    return _upload_data[user_id]
+def save_pending_upload(user_id: int, anime: str, character: str, photo_file_id: str, message_id: int) -> None:
+    """Save a pending upload waiting for rarity selection."""
+    _pending_uploads[user_id] = {
+        "anime": anime,
+        "character": character,
+        "photo_file_id": photo_file_id,
+        "message_id": message_id,
+        "created_at": datetime.now()
+    }
 
 
-def clear_upload_data(user_id: int) -> None:
-    """Clear upload data for a user."""
-    _upload_data.pop(user_id, None)
+def get_pending_upload(user_id: int) -> Optional[Dict[str, Any]]:
+    """Get pending upload for a user."""
+    return _pending_uploads.get(user_id)
+
+
+def clear_pending_upload(user_id: int) -> None:
+    """Clear pending upload for a user."""
+    _pending_uploads.pop(user_id, None)
 
 
 # ============================================================
@@ -148,8 +151,11 @@ async def upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         last_name=user.last_name
     )
     
-    # Clear any previous upload data
-    clear_upload_data(user.id)
+    # Clear any pending uploads
+    clear_pending_upload(user.id)
+    
+    # Clear context data
+    context.user_data.clear()
     
     # Send welcome message
     await update.message.reply_text(
@@ -195,9 +201,8 @@ async def upload_anime_received(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return UPLOAD_ANIME
     
-    # Store anime name
-    upload_data = get_upload_data(user.id)
-    upload_data["anime"] = anime_name
+    # Store anime name in context
+    context.user_data["anime"] = anime_name
     
     app_logger.info(f"📤 Upload: User {user.id} entered anime '{anime_name}'")
     
@@ -242,13 +247,12 @@ async def upload_character_received(update: Update, context: ContextTypes.DEFAUL
         )
         return UPLOAD_CHARACTER
     
-    # Store character name
-    upload_data = get_upload_data(user.id)
-    upload_data["character"] = character_name
+    # Store character name in context
+    context.user_data["character"] = character_name
     
     app_logger.info(f"📤 Upload: User {user.id} entered character '{character_name}'")
     
-    anime = upload_data.get("anime", "Unknown")
+    anime = context.user_data.get("anime", "Unknown")
     
     # Ask for photo
     await update.message.reply_text(
@@ -268,20 +272,18 @@ async def upload_character_received(update: Update, context: ContextTypes.DEFAUL
 
 
 async def upload_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle photo/document input - then ask for rarity."""
+    """Handle photo/document input - then show rarity selection."""
     user = update.effective_user
     message = update.message
     
     # Extract photo file ID
     photo_file_id: Optional[str] = None
     
-    # Check if it's a photo
     if message.photo:
         photo: PhotoSize = message.photo[-1]
         photo_file_id = photo.file_id
         app_logger.info(f"📤 Upload: Received photo from user {user.id}")
     
-    # Check if it's a document (image file)
     elif message.document:
         doc: Document = message.document
         
@@ -298,7 +300,6 @@ async def upload_photo_received(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return UPLOAD_PHOTO
     
-    # No valid image found
     if not photo_file_id:
         await message.reply_text(
             "❌ *No Image Detected*\n\n"
@@ -310,55 +311,45 @@ async def upload_photo_received(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return UPLOAD_PHOTO
     
-    # Store photo file ID
-    upload_data = get_upload_data(user.id)
-    upload_data["photo_file_id"] = photo_file_id
-    
-    anime = upload_data.get("anime", "Unknown")
-    character = upload_data.get("character", "Unknown")
+    # Get stored data
+    anime = context.user_data.get("anime", "Unknown")
+    character = context.user_data.get("character", "Unknown")
     
     # Build rarity selection keyboard
-    # Row 1: Normal, Common, Uncommon
-    # Row 2: Rare, Epic, Limited Edition
-    # Row 3: Platinum, Emerald, Crystal
-    # Row 4: Mythical, Legendary
-    # Row 5: Random
-    
     keyboard = InlineKeyboardMarkup([
-        # Row 1: Normal to Uncommon
         [
-            InlineKeyboardButton("🛞 Normal (50%)", callback_data="rarity_1"),
-            InlineKeyboardButton("🌀 Common (20%)", callback_data="rarity_2"),
+            InlineKeyboardButton("🛞 Normal (50%)", callback_data=f"upload_rarity_{user.id}_1"),
+            InlineKeyboardButton("🌀 Common (20%)", callback_data=f"upload_rarity_{user.id}_2"),
         ],
         [
-            InlineKeyboardButton("🥏 Uncommon (10%)", callback_data="rarity_3"),
-            InlineKeyboardButton("☘️ Rare (7%)", callback_data="rarity_4"),
+            InlineKeyboardButton("🥏 Uncommon (10%)", callback_data=f"upload_rarity_{user.id}_3"),
+            InlineKeyboardButton("☘️ Rare (7%)", callback_data=f"upload_rarity_{user.id}_4"),
         ],
         [
-            InlineKeyboardButton("🫧 Epic (4%)", callback_data="rarity_5"),
-            InlineKeyboardButton("🎐 Limited (2%)", callback_data="rarity_6"),
+            InlineKeyboardButton("🫧 Epic (4%)", callback_data=f"upload_rarity_{user.id}_5"),
+            InlineKeyboardButton("🎐 Limited (2%)", callback_data=f"upload_rarity_{user.id}_6"),
         ],
         [
-            InlineKeyboardButton("❄️ Platinum (1%)", callback_data="rarity_7"),
-            InlineKeyboardButton("💎 Emerald (0.5%)", callback_data="rarity_8"),
+            InlineKeyboardButton("❄️ Platinum (1%)", callback_data=f"upload_rarity_{user.id}_7"),
+            InlineKeyboardButton("💎 Emerald (0.5%)", callback_data=f"upload_rarity_{user.id}_8"),
         ],
         [
-            InlineKeyboardButton("🌸 Crystal (0.3%)", callback_data="rarity_9"),
-            InlineKeyboardButton("🧿 Mythical (0.15%)", callback_data="rarity_10"),
+            InlineKeyboardButton("🌸 Crystal (0.3%)", callback_data=f"upload_rarity_{user.id}_9"),
+            InlineKeyboardButton("🧿 Mythical (0.15%)", callback_data=f"upload_rarity_{user.id}_10"),
         ],
         [
-            InlineKeyboardButton("⚡ Legendary (0.05%)", callback_data="rarity_11"),
+            InlineKeyboardButton("⚡ Legendary (0.05%)", callback_data=f"upload_rarity_{user.id}_11"),
         ],
         [
-            InlineKeyboardButton("🎲 Random Rarity", callback_data="rarity_random"),
+            InlineKeyboardButton("🎲 Random Rarity", callback_data=f"upload_rarity_{user.id}_random"),
         ],
         [
-            InlineKeyboardButton("❌ Cancel Upload", callback_data="rarity_cancel"),
+            InlineKeyboardButton("❌ Cancel Upload", callback_data=f"upload_rarity_{user.id}_cancel"),
         ],
     ])
     
     # Send image preview with rarity selection
-    await message.reply_photo(
+    sent_message = await message.reply_photo(
         photo=photo_file_id,
         caption=(
             f"✅ *Anime:* `{anime}`\n"
@@ -373,63 +364,110 @@ async def upload_photo_received(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=keyboard
     )
     
-    return UPLOAD_RARITY
+    # Save pending upload data
+    save_pending_upload(
+        user_id=user.id,
+        anime=anime,
+        character=character,
+        photo_file_id=photo_file_id,
+        message_id=sent_message.message_id
+    )
+    
+    app_logger.info(f"📤 Upload: Waiting for rarity selection from user {user.id}")
+    
+    # End conversation - rarity will be handled by separate callback handler
+    return ConversationHandler.END
 
 
-async def upload_rarity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle rarity selection callback."""
+async def upload_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle upload cancellation via /cancel command."""
+    user = update.effective_user
+    
+    # Clear data
+    clear_pending_upload(user.id)
+    context.user_data.clear()
+    
+    await update.message.reply_text(
+        "❌ *Upload Cancelled*\n\n"
+        "Your upload has been cancelled.\n"
+        "Use /upload to start again.",
+        parse_mode="Markdown"
+    )
+    
+    app_logger.info(f"📤 Upload cancelled by user {user.id}")
+    
+    return ConversationHandler.END
+
+
+# ============================================================
+# 🎨 Rarity Selection Callback Handler (SEPARATE from ConversationHandler)
+# ============================================================
+
+async def upload_rarity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle rarity selection callback - runs OUTSIDE ConversationHandler."""
     query = update.callback_query
     user = query.from_user
     data = query.data
     
+    # Parse callback data: upload_rarity_{user_id}_{rarity}
+    try:
+        parts = data.split("_")
+        # upload_rarity_123456789_5
+        if len(parts) != 4 or parts[0] != "upload" or parts[1] != "rarity":
+            return
+        
+        callback_user_id = int(parts[2])
+        rarity_value = parts[3]
+        
+    except (ValueError, IndexError):
+        await query.answer("❌ Invalid selection.", show_alert=True)
+        return
+    
+    # Verify user is the uploader
+    if user.id != callback_user_id:
+        await query.answer("❌ This is not your upload!", show_alert=True)
+        return
+    
     await query.answer()
     
+    # Get pending upload
+    pending = get_pending_upload(user.id)
+    
+    if not pending:
+        await query.edit_message_caption(
+            caption="❌ *Session Expired*\n\nPlease use /upload to start again.",
+            parse_mode="Markdown"
+        )
+        return
+    
     # Handle cancel
-    if data == "rarity_cancel":
-        clear_upload_data(user.id)
+    if rarity_value == "cancel":
+        clear_pending_upload(user.id)
         
         await query.edit_message_caption(
             caption="❌ *Upload Cancelled*\n\nUse /upload to start again.",
             parse_mode="Markdown"
         )
         
-        app_logger.info(f"📤 Upload cancelled by user {user.id}")
-        return ConversationHandler.END
-    
-    # Get upload data
-    upload_data = get_upload_data(user.id)
-    
-    if not upload_data:
-        await query.edit_message_caption(
-            caption="❌ *Session Expired*\n\nPlease use /upload to start again.",
-            parse_mode="Markdown"
-        )
-        return ConversationHandler.END
-    
-    anime = upload_data.get("anime", "Unknown")
-    character = upload_data.get("character", "Unknown")
-    photo_file_id = upload_data.get("photo_file_id")
-    
-    if not photo_file_id:
-        await query.edit_message_caption(
-            caption="❌ *Error*\n\nImage not found. Please use /upload to start again.",
-            parse_mode="Markdown"
-        )
-        clear_upload_data(user.id)
-        return ConversationHandler.END
+        app_logger.info(f"📤 Upload cancelled by user {user.id} via button")
+        return
     
     # Determine rarity
-    if data == "rarity_random":
+    if rarity_value == "random":
         rarity_id = get_random_rarity()
         app_logger.info(f"📤 Upload: Random rarity selected: {rarity_id}")
     else:
-        # Parse rarity from callback data: rarity_1, rarity_2, etc.
         try:
-            rarity_id = int(data.replace("rarity_", ""))
+            rarity_id = int(rarity_value)
             if not 1 <= rarity_id <= 11:
                 rarity_id = get_random_rarity()
         except ValueError:
             rarity_id = get_random_rarity()
+    
+    # Get data from pending upload
+    anime = pending["anime"]
+    character = pending["character"]
+    photo_file_id = pending["photo_file_id"]
     
     rarity_name, rarity_prob, rarity_emoji = rarity_to_text(rarity_id)
     
@@ -458,8 +496,8 @@ async def upload_rarity_callback(update: Update, context: ContextTypes.DEFAULT_T
                 ),
                 parse_mode="Markdown"
             )
-            clear_upload_data(user.id)
-            return ConversationHandler.END
+            clear_pending_upload(user.id)
+            return
         
         card_id = card["card_id"]
         
@@ -475,8 +513,8 @@ async def upload_rarity_callback(update: Update, context: ContextTypes.DEFAULT_T
             ),
             parse_mode="Markdown"
         )
-        clear_upload_data(user.id)
-        return ConversationHandler.END
+        clear_pending_upload(user.id)
+        return
     
     # Set cooldown
     set_upload_cooldown(user.id)
@@ -484,7 +522,7 @@ async def upload_rarity_callback(update: Update, context: ContextTypes.DEFAULT_T
     # Get total card count
     total_cards = await get_card_count(None)
     
-    # Send success message
+    # Update message with success
     await query.edit_message_caption(
         caption=(
             "🎉 *Card Uploaded Successfully!*\n\n"
@@ -502,39 +540,8 @@ async def upload_rarity_callback(update: Update, context: ContextTypes.DEFAULT_T
         parse_mode="Markdown"
     )
     
-    # Clear upload data
-    clear_upload_data(user.id)
-    
-    return ConversationHandler.END
-
-
-async def upload_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle upload cancellation via /cancel command."""
-    user = update.effective_user
-    
-    # Clear upload data
-    clear_upload_data(user.id)
-    
-    await update.message.reply_text(
-        "❌ *Upload Cancelled*\n\n"
-        "Your upload has been cancelled.\n"
-        "Use /upload to start again.",
-        parse_mode="Markdown"
-    )
-    
-    app_logger.info(f"📤 Upload cancelled by user {user.id}")
-    
-    return ConversationHandler.END
-
-
-async def upload_invalid_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle invalid input during photo step."""
-    await update.message.reply_text(
-        "⚠️ *Invalid Input*\n\n"
-        "Please send a photo or image file.\n"
-        "Use /cancel to abort the upload.",
-        parse_mode="Markdown"
-    )
+    # Clear pending upload
+    clear_pending_upload(user.id)
 
 
 # ============================================================
@@ -545,21 +552,14 @@ async def quick_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """
     Quick upload by replying to a photo with:
     /quickupload Anime | Character | Rarity
-    
-    Rarity can be:
-    - Number (1-11)
-    - Name (Normal, Common, Rare, etc.)
-    - "random" for random rarity
     """
     user = update.effective_user
     message = update.message
     
-    # Check admin
     if not Config.is_admin(user.id):
         await message.reply_text("❌ Admin only command.")
         return
     
-    # Check if replying to a photo
     if not message.reply_to_message or not message.reply_to_message.photo:
         await message.reply_text(
             "📤 *Quick Upload*\n\n"
@@ -577,7 +577,6 @@ async def quick_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
     
-    # Parse arguments
     args_text = message.text.replace("/quickupload", "").strip()
     
     if not args_text:
@@ -600,21 +599,15 @@ async def quick_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     character = parts[1]
     rarity_id = None
     
-    # Parse rarity (optional, defaults to random)
     if len(parts) >= 3:
         rarity_input = parts[2].strip().lower()
         
-        # Check if it's a number
         if rarity_input.isdigit():
             rarity_id = int(rarity_input)
             if not 1 <= rarity_id <= 11:
                 rarity_id = None
-        
-        # Check if it's "random"
         elif rarity_input == "random":
-            rarity_id = None  # Will be set to random below
-        
-        # Check if it's a rarity name
+            rarity_id = None
         else:
             rarity_names = {
                 "normal": 1, "common": 2, "uncommon": 3, "rare": 4,
@@ -624,14 +617,11 @@ async def quick_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             }
             rarity_id = rarity_names.get(rarity_input)
     
-    # Use random if not specified or invalid
     if rarity_id is None:
         rarity_id = get_random_rarity()
     
-    # Get photo file ID
     photo_file_id = message.reply_to_message.photo[-1].file_id
     
-    # Save to database
     try:
         card = await add_card(
             pool=None,
@@ -661,9 +651,10 @@ async def quick_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 # ============================================================
-# 🔧 Conversation Handler Setup
+# 🔧 Handlers Export
 # ============================================================
 
+# ConversationHandler for steps 1-3
 upload_conversation_handler = ConversationHandler(
     entry_points=[
         CommandHandler("upload", upload_start),
@@ -678,20 +669,18 @@ upload_conversation_handler = ConversationHandler(
         UPLOAD_PHOTO: [
             MessageHandler(filters.PHOTO | filters.Document.IMAGE, upload_photo_received),
         ],
-        UPLOAD_RARITY: [
-            CallbackQueryHandler(upload_rarity_callback, pattern=r"^rarity_"),
-        ],
     },
     fallbacks=[
         CommandHandler("cancel", upload_cancel),
-        CallbackQueryHandler(upload_rarity_callback, pattern=r"^rarity_cancel$"),
     ],
-    # REMOVED: conversation_timeout=600,
     name="upload_conversation",
     persistent=False,
-    per_message=False,
-    per_chat=True,
-    per_user=True,
+)
+
+# Separate callback handler for rarity selection (NOT inside ConversationHandler)
+upload_rarity_callback_handler = CallbackQueryHandler(
+    upload_rarity_callback,
+    pattern=r"^upload_rarity_"
 )
 
 # Quick upload command handler
