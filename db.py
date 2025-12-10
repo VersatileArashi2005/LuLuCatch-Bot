@@ -1341,3 +1341,94 @@ async def get_table_counts(pool: Optional[Pool]) -> dict:
         }
     except Exception:
         return {}
+
+
+-- ============================================================
+-- Part 4: Database Migration SQL
+-- Add to your PostgreSQL database
+-- ============================================================
+
+-- ========================================
+-- 1. TRADES TABLE - Store trade requests
+-- ========================================
+CREATE TABLE IF NOT EXISTS trades (
+    trade_id SERIAL PRIMARY KEY,
+    from_user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    to_user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    offered_card_id INTEGER NOT NULL REFERENCES cards(card_id) ON DELETE CASCADE,
+    requested_card_id INTEGER REFERENCES cards(card_id) ON DELETE SET NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    message TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    completed_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Constraints
+    CONSTRAINT valid_status CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed', 'failed')),
+    CONSTRAINT no_self_trade CHECK (from_user_id != to_user_id)
+);
+
+-- ========================================
+-- 2. STATS TABLE - Aggregated statistics
+-- ========================================
+CREATE TABLE IF NOT EXISTS stats (
+    stat_id SERIAL PRIMARY KEY,
+    stat_key VARCHAR(100) UNIQUE NOT NULL,
+    stat_value BIGINT DEFAULT 0,
+    description TEXT,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- ========================================
+-- 3. TRADE HISTORY TABLE - Completed trades log
+-- ========================================
+CREATE TABLE IF NOT EXISTS trade_history (
+    history_id SERIAL PRIMARY KEY,
+    trade_id INTEGER NOT NULL,
+    from_user_id BIGINT NOT NULL,
+    to_user_id BIGINT NOT NULL,
+    offered_card_id INTEGER NOT NULL,
+    requested_card_id INTEGER,
+    completed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- ========================================
+-- 4. INDEXES for Performance
+-- ========================================
+
+-- Trades indexes
+CREATE INDEX IF NOT EXISTS idx_trades_from_user ON trades(from_user_id);
+CREATE INDEX IF NOT EXISTS idx_trades_to_user ON trades(to_user_id);
+CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
+CREATE INDEX IF NOT EXISTS idx_trades_pending ON trades(to_user_id, status) WHERE status = 'pending';
+
+-- Stats index
+CREATE INDEX IF NOT EXISTS idx_stats_key ON stats(stat_key);
+
+-- ========================================
+-- 5. INSERT DEFAULT STATS
+-- ========================================
+INSERT INTO stats (stat_key, stat_value, description) VALUES
+    ('total_trades', 0, 'Total completed trades'),
+    ('total_catches_today', 0, 'Cards caught today'),
+    ('total_spawns_today', 0, 'Cards spawned today'),
+    ('last_stats_update', 0, 'Timestamp of last stats update')
+ON CONFLICT (stat_key) DO NOTHING;
+
+-- ========================================
+-- 6. FUNCTION: Update trade timestamp
+-- ========================================
+CREATE OR REPLACE FUNCTION update_trade_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger for trades table
+DROP TRIGGER IF EXISTS trigger_update_trade_timestamp ON trades;
+CREATE TRIGGER trigger_update_trade_timestamp
+    BEFORE UPDATE ON trades
+    FOR EACH ROW
+    EXECUTE FUNCTION update_trade_timestamp();
