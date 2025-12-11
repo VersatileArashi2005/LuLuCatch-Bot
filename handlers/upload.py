@@ -799,55 +799,134 @@ async def show_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 
 # ============================================================
-# 🟩 Step 6: Confirm & Save (with Duplicate Detection)
+# 🟩 Step 6: Confirm & Save (FIXED - with proper callback handling)
 # ============================================================
 
 async def confirm_upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle upload confirmation with photo duplicate detection."""
+    """
+    Handle upload confirmation with photo duplicate detection.
+    
+    Fixed to:
+    - Answer callback immediately to prevent Telegram freeze
+    - Run duplicate check AFTER answering
+    - Only check photo_file_id duplicates (not anime+character)
+    - Proper error handling with user feedback
+    - Keep session active on errors
+    """
     query = update.callback_query
     user = query.from_user
     
+    # ========================================
+    # STEP 1: Answer callback IMMEDIATELY
+    # ========================================
+    await query.answer()
+    
+    # Get upload data
     upload_data = get_upload_data(context)
     anime = upload_data.get('anime')
     character = upload_data.get('character')
     rarity = upload_data.get('rarity')
     photo_file_id = upload_data.get('photo_file_id')
     
-    # ========================================
-    # DUPLICATE CHECK: Photo-based only
-    # ========================================
-    
-    await query.answer("Checking for duplicates...")
-    
-    photo_exists, existing_card_id = await check_photo_exists(photo_file_id)
-    
-    if photo_exists:
-        # Photo already uploaded!
+    # Validate data exists
+    if not all([anime, character, rarity, photo_file_id]):
         await query.edit_message_caption(
             caption=(
-                "⚠️ *Duplicate Photo Detected!*\n\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                f"This exact photo already exists as Card `#{existing_card_id}`.\n\n"
-                "Please upload a different image or cancel.\n"
-                "━━━━━━━━━━━━━━━━━━━━\n\n"
-                "💡 Tip: Same character is allowed, but not the same photo."
+                "❌ *Upload Error*\n\n"
+                "Some data is missing. Please try again.\n\n"
+                "Use /upload to restart."
             ),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Upload New Photo", callback_data="upload_edit_photo")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")]
-            ])
+            parse_mode="Markdown"
         )
-        
-        app_logger.warning(f"📤 Duplicate photo detected: {photo_file_id} (Card #{existing_card_id})")
-        
-        return PREVIEW_CONFIRM
+        clear_upload_data(context)
+        return ConversationHandler.END
+    
+    # Show processing message
+    try:
+        await query.edit_message_caption(
+            caption=(
+                "⏳ *Processing...*\n\n"
+                "Checking for duplicates and saving card...\n"
+                "Please wait a moment."
+            ),
+            parse_mode="Markdown"
+        )
+    except Exception:
+        pass  # Ignore if message can't be edited
     
     # ========================================
-    # No duplicate - proceed with save
+    # STEP 2: Run duplicate check AFTER callback answered
     # ========================================
     
     try:
+        # Check if this exact photo already exists
+        photo_exists, existing_card_id = await check_photo_exists(photo_file_id)
+        
+        if photo_exists:
+            # ========================================
+            # DUPLICATE FOUND - Keep session active
+            # ========================================
+            
+            app_logger.warning(
+                f"📤 Duplicate photo detected: {photo_file_id} "
+                f"(existing Card #{existing_card_id})"
+            )
+            
+            # Get existing card info for better error message
+            try:
+                from db import get_card_by_id
+                existing_card = await get_card_by_id(None, existing_card_id)
+                
+                if existing_card:
+                    existing_char = existing_card.get('character_name', 'Unknown')
+                    existing_anime = existing_card.get('anime', 'Unknown')
+                    duplicate_msg = (
+                        f"This image is already used for:\n"
+                        f"🎬 {existing_anime}\n"
+                        f"👤 {existing_char}\n"
+                        f"🆔 Card `#{existing_card_id}`"
+                    )
+                else:
+                    duplicate_msg = f"This image already exists as Card `#{existing_card_id}`"
+            except Exception:
+                duplicate_msg = "This image already exists in the database"
+            
+            # Build keyboard with options
+            keyboard = [
+                [InlineKeyboardButton("🖼 Upload Different Photo", callback_data="upload_edit_photo")],
+                [InlineKeyboardButton("✏️ Edit Other Fields", callback_data="upload_edit")],
+                [InlineKeyboardButton("❌ Cancel Upload", callback_data="upload_cancel")]
+            ]
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Update message with duplicate warning
+            await query.edit_message_caption(
+                caption=(
+                    "⚠️ *Duplicate Photo Detected!*\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{duplicate_msg}\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "💡 *What you can do:*\n"
+                    "• Upload a different photo\n"
+                    "• Edit anime/character/rarity\n"
+                    "• Cancel this upload\n\n"
+                    "⚠️ Same character is allowed, but not the same image."
+                ),
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+            
+            # KEEP SESSION ACTIVE - return to PREVIEW_CONFIRM state
+            return PREVIEW_CONFIRM
+        
+        # ========================================
+        # STEP 3: No duplicate - Save to database
+        # ========================================
+        
+        rarity_name, rarity_prob, rarity_emoji = rarity_to_text(rarity)
+        
+        # Insert card into database
         card = await add_card(
             pool=None,
             anime=anime,
@@ -860,13 +939,14 @@ async def confirm_upload_callback(update: Update, context: ContextTypes.DEFAULT_
         )
         
         if card is None:
-            # This shouldn't happen now (we removed anime+character uniqueness)
-            # But keep as fallback
-            await query.answer("⚠️ Failed to save card!", show_alert=True)
-            clear_upload_data(context)
-            return ConversationHandler.END
+            # Database constraint violation (shouldn't happen with new logic)
+            raise Exception("Database constraint violation - card already exists")
         
         card_id = card["card_id"]
+        
+        # ========================================
+        # STEP 4: Success handling
+        # ========================================
         
         # Set cooldown
         set_upload_cooldown(user.id)
@@ -874,38 +954,107 @@ async def confirm_upload_callback(update: Update, context: ContextTypes.DEFAULT_
         # Get total card count
         total_cards = await get_card_count(None)
         
-        rarity_name, rarity_prob, rarity_emoji = rarity_to_text(rarity)
+        # Log success
+        app_logger.info(
+            f"✅ Card #{card_id} uploaded successfully: "
+            f"{character} ({anime}) - {rarity_emoji} {rarity_name} "
+            f"by user {user.id}"
+        )
         
-        # Success message
+        # Build success message
+        success_caption = (
+            "🎉 *Card Uploaded Successfully!*\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 *Card ID:* `#{card_id}`\n"
+            f"🎬 *Anime:* {anime}\n"
+            f"👤 *Character:* {character}\n"
+            f"✨ *Rarity:* {rarity_emoji} {rarity_name} ({rarity_prob}%)\n"
+            f"👤 *Uploaded by:* {user.first_name}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📦 *Total cards in database:* {total_cards:,}\n\n"
+            "✅ Card is now available for catching!\n\n"
+            "💡 Use /upload to add another card."
+        )
+        
+        # Update message with success
         await query.edit_message_caption(
-            caption=(
-                "🎉 *Card Uploaded Successfully!*\n\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                f"🆔 *ID:* `#{card_id}`\n"
-                f"🎬 *Anime:* {anime}\n"
-                f"👤 *Character:* {character}\n"
-                f"✨ *Rarity:* {rarity_emoji} {rarity_name} ({rarity_prob}%)\n"
-                f"👤 *Uploader:* {user.first_name}\n"
-                "━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📦 Total cards in database: *{total_cards}*\n\n"
-                "Use /upload to add more cards!"
-            ),
+            caption=success_caption,
             parse_mode="Markdown"
         )
         
-        await query.answer("✅ Card saved!")
-        
-        app_logger.info(f"✅ Card #{card_id} uploaded: {character} ({anime}) by user {user.id}")
-        
-        # Clear session
+        # Clear session data
         clear_upload_data(context)
+        
+        # Send notification to user (optional - nice touch)
+        try:
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=(
+                    f"✅ Card `#{card_id}` successfully added!\n\n"
+                    f"Use /cardinfo {card_id} to view details."
+                ),
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass  # Ignore if can't send notification
         
         return ConversationHandler.END
         
     except Exception as e:
-        error_logger.error(f"Failed to save card: {e}", exc_info=True)
-        await query.answer("❌ Error saving card!", show_alert=True)
-        return ConversationHandler.END
+        # ========================================
+        # STEP 5: Error handling - Keep session active
+        # ========================================
+        
+        error_logger.error(
+            f"Failed to save card during upload by user {user.id}: {e}",
+            exc_info=True
+        )
+        
+        # Build error message for user
+        error_message = str(e)[:200]  # Limit error message length
+        
+        # Build keyboard with retry options
+        keyboard = [
+            [InlineKeyboardButton("🔄 Try Again", callback_data="upload_confirm")],
+            [InlineKeyboardButton("✏️ Edit Upload", callback_data="upload_edit")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        try:
+            await query.edit_message_caption(
+                caption=(
+                    "❌ *Upload Failed*\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"An error occurred while saving the card:\n\n"
+                    f"`{error_message}`\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "💡 *What to do:*\n"
+                    "• Try confirming again (temporary error)\n"
+                    "• Edit the upload data\n"
+                    "• Cancel and start over\n\n"
+                    "If this persists, contact the bot admin."
+                ),
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        except Exception as edit_error:
+            # If can't edit, send new message
+            error_logger.error(f"Could not edit message after error: {edit_error}")
+            
+            try:
+                await query.message.reply_text(
+                    "❌ *Upload Failed*\n\n"
+                    f"Error: `{error_message}`\n\n"
+                    "Please use /upload to try again.",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+        
+        # KEEP SESSION ACTIVE - Don't clear data, let user retry
+        return PREVIEW_CONFIRM
 
 
 # ============================================================
