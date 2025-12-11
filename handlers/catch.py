@@ -1186,8 +1186,6 @@ battle_callback = CallbackQueryHandler(
     pattern=r"^c[bf]_"
 )
 
-# Disabled name guessing for security
-name_guess_message_handler = MessageHandler(
-    filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
-    lambda u, c: None
-)
+# Name guessing completely disabled - use a dummy handler that never matches
+# This prevents any text message processing
+name_guess_message_handler = None
