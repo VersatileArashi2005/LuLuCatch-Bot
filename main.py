@@ -61,8 +61,10 @@ from handlers.admin import (
 )
 from handlers.catch import (
     catch_command_handler,
-    battle_callback,
     force_spawn_handler,
+    clear_cheat_handler,
+    view_cheaters_handler,
+    battle_callback,
     name_guess_message_handler,
 )
 
@@ -168,19 +170,23 @@ async def setup_bot() -> Application:
                 )
                 return
 
-            # Handle harem from inline
-            elif param == "harem":
-                # Redirect to collection command
-                pass  # Fall through to normal start
+            # Handle collection from inline
+            elif param == "collection" or param == "harem":
+                await update.message.reply_text(
+                    "🎴 *Your Collection*\n\n"
+                    "Use `/collection` to view your cards!",
+                    parse_mode="Markdown"
+                )
+                return
 
         await update.message.reply_text(
             f"🎴 *Welcome to LuLuCatch, {user.first_name}!*\n\n"
             f"I'm a card collection bot. Catch cards when they spawn in groups!\n\n"
             f"📚 *Commands:*\n"
             f"• /start - Show this message\n"
-            f"• /info - View bot information\n"
-            f"• /collection - View your card collection\n"
-            f"• /catch - Catch a spawned card\n"
+            f"• /help - View all commands\n"
+            f"• /catch - Battle for a card\n"
+            f"• /collection - View your cards\n"
             f"• /cardinfo <id> - Check card details\n"
             f"• /trades - View pending trades\n"
             f"• /leaderboard - Top collectors\n\n"
@@ -206,7 +212,7 @@ async def setup_bot() -> Application:
                 f"🎯 Total Catches: {stats['total_catches']:,}\n"
                 f"💬 Active Groups: {stats['active_groups']:,}\n\n"
                 f"🗄️ Database: ✅ Connected\n"
-                f"🔧 Version: 1.0.0 (Part 4)",
+                f"🔧 Version: 2.0.0 (Anti-Cheat)",
                 parse_mode="Markdown"
             )
         else:
@@ -230,20 +236,20 @@ async def setup_bot() -> Application:
             "• /start - Welcome message\n"
             "• /info - Bot statistics\n"
             "• /help - This help message\n\n"
+            "*Catching:*\n"
+            "• /catch - Find & battle a card\n"
+            "• Win = Card is yours! 🏆\n"
+            "• Lose = Card escapes 💀\n\n"
             "*Collection:*\n"
             "• /collection - View your cards\n"
             "• /cardinfo <id> - Card details\n\n"
-            "*Catching:*\n"
-            "• /catch - Battle for a card\n"
-            "• Type character name to guess\n\n"
             "*Trading:*\n"
             "• /trades - View pending trades\n"
-            "• /offertrade <card_id> <user_id> - Offer trade\n"
-            "• /viewtrade <id> - View trade details\n\n"
+            "• /offertrade - Offer a trade\n\n"
             "*Leaderboard:*\n"
             "• /leaderboard - Top collectors\n\n"
             "*Inline Mode:*\n"
-            "Type `@" + (context.bot.username or "bot") + " <query>` to search cards\n"
+            "Type `@" + (context.bot.username or "bot") + " <query>` to search\n"
             "━━━━━━━━━━━━━━━━━━━━",
             parse_mode="Markdown"
         )
@@ -269,7 +275,7 @@ async def setup_bot() -> Application:
 
     application.add_handler(upload_conversation_handler)
     application.add_handler(broadcast_conversation_handler)
-    application.add_handler(edit_conversation_handler)  # NEW: Edit card conversation
+    application.add_handler(edit_conversation_handler)
 
     # ========================================
     # Register Command Handlers
@@ -283,6 +289,8 @@ async def setup_bot() -> Application:
     # Catch commands
     application.add_handler(catch_command_handler)
     application.add_handler(force_spawn_handler)
+    application.add_handler(clear_cheat_handler)
+    application.add_handler(view_cheaters_handler)
 
     # Admin commands
     application.add_handler(admin_command_handler)
@@ -291,7 +299,7 @@ async def setup_bot() -> Application:
     application.add_handler(unban_command_handler)
     application.add_handler(quick_upload_handler)
 
-    # NEW: Additional admin commands
+    # New admin commands
     application.add_handler(delete_command_handler)
     application.add_handler(userinfo_command_handler)
     application.add_handler(give_card_command_handler)
@@ -304,25 +312,26 @@ async def setup_bot() -> Application:
     # Upload rarity selection
     application.add_handler(upload_rarity_callback_handler)
 
-    # Admin panel callbacks
+    # Admin panel callbacks (exclude specific patterns)
     application.add_handler(CallbackQueryHandler(
         admin_callback_handler,
-        pattern=r"^admin_(?!delcard_|user_|edit_)"  # Exclude new patterns
+        pattern=r"^admin_(?!delcard_|user_|edit_)"
     ))
 
-    # NEW: Delete card callbacks
+    # Delete card callbacks
     application.add_handler(delete_card_callback_handler)
 
-    # NEW: User management callbacks
+    # User management callbacks
     application.add_handler(user_management_callback_handler)
 
-    # Battle callbacks
+    # Battle/Catch callbacks (secured with anti-cheat)
     application.add_handler(battle_callback)
 
     # ========================================
     # Register Message Handlers
     # ========================================
 
+    # Name guess handler (disabled for security, but kept for compatibility)
     application.add_handler(name_guess_message_handler)
 
     # ========================================
@@ -353,13 +362,13 @@ async def setup_bot() -> Application:
 
     commands = [
         BotCommand("start", "🚀 Start the bot"),
-        BotCommand("info", "📊 Bot information"),
         BotCommand("help", "📚 Help & commands"),
         BotCommand("catch", "⚔️ Battle for a card"),
         BotCommand("collection", "🎴 Your collection"),
         BotCommand("cardinfo", "🔍 Card details"),
         BotCommand("trades", "🔁 Pending trades"),
         BotCommand("leaderboard", "🏆 Top collectors"),
+        BotCommand("info", "📊 Bot statistics"),
     ]
 
     try:
@@ -367,7 +376,7 @@ async def setup_bot() -> Application:
     except Exception as e:
         error_logger.error(f"Failed to set commands: {e}")
 
-    log_startup("✅ Bot application configured with battle system and admin commands")
+    log_startup("✅ Bot configured with anti-cheat system")
 
     return application
 
@@ -451,7 +460,7 @@ async def lifespan(app: FastAPI):
         log_startup("⚠️ No webhook URL configured, using polling mode")
         asyncio.create_task(bot_app.updater.start_polling(drop_pending_updates=True))
 
-    log_startup("🎴 LuLuCatch Bot is running!")
+    log_startup("🎴 LuLuCatch Bot is running with anti-cheat protection!")
 
     yield  # Application is running
 
@@ -475,8 +484,8 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app with lifespan
 app = FastAPI(
     title="LuLuCatch Card Bot",
-    description="Telegram Card Collection Bot API",
-    version="1.0.0",
+    description="Telegram Card Collection Bot API with Anti-Cheat",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -491,9 +500,10 @@ async def root():
     return {
         "status": "online",
         "bot": "LuLuCatch",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "database": "connected" if db.is_connected else "disconnected",
-        "message": "🎴 Card collection bot is running!"
+        "features": ["anti-cheat", "individual-cooldowns", "rarity-based-battles"],
+        "message": "🎴 Card collection bot with anti-cheat protection!"
     }
 
 
@@ -508,6 +518,7 @@ async def health_check():
         "status": "healthy" if db_status else "degraded",
         "database": "connected" if db_status else "disconnected",
         "bot": "running" if bot_app else "stopped",
+        "anti_cheat": "active",
     }
 
 
@@ -541,7 +552,7 @@ async def webhook_handler(request: Request) -> Response:
 
         # Log incoming update
         update_id = update_data.get("update_id", "unknown")
-        app_logger.info(f"📥 Received update: {update_id}")
+        app_logger.debug(f"📥 Received update: {update_id}")
 
         # Convert to Update object
         update = Update.de_json(update_data, bot_app.bot)
@@ -560,7 +571,7 @@ async def webhook_handler(request: Request) -> Response:
 @app.get("/webhook")
 async def webhook_get():
     """GET endpoint for webhook verification."""
-    return {"status": "Webhook endpoint active"}
+    return {"status": "Webhook endpoint active", "anti_cheat": "enabled"}
 
 
 # ============================================================
