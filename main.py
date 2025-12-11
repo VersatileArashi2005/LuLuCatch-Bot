@@ -64,6 +64,12 @@ from commands.inline_search import (
     register_inline_callback_handlers,
 )
 
+# Import Part 4 handlers
+from commands.collection import register_collection_handlers
+from commands.cardinfo import register_cardinfo_handlers
+from commands.trade import register_trade_handlers
+from commands.leaderboard import register_leaderboard_handlers
+
 
 # ============================================================
 # 🤖 Telegram Bot Application
@@ -123,7 +129,7 @@ async def setup_bot() -> Application:
                             f"━━━━━━━━━━━━━━━━━━━━\n"
                             f"🎬 *Anime:* {card['anime']}\n"
                             f"🆔 *ID:* `#{card['card_id']}`\n"
-                            f"✨ *Rarity:* {rarity_emoji} {rarity_name}\n"
+                            f"✨ *Rarity:* {rarity_emoji} {rarity_name} ({rarity_prob}%)\n"
                             f"📊 *Drop Rate:* {rarity_prob}%\n"
                             f"━━━━━━━━━━━━━━━━━━━━"
                         )
@@ -156,7 +162,7 @@ async def setup_bot() -> Application:
             
             # Handle harem from inline
             elif param == "harem":
-                # Redirect to harem command
+                # Redirect to collection command
                 pass  # Fall through to normal start
         
         await update.message.reply_text(
@@ -165,9 +171,11 @@ async def setup_bot() -> Application:
             f"📚 *Commands:*\n"
             f"• /start - Show this message\n"
             f"• /info - View bot information\n"
-            f"• /harem - View your card collection\n"
+            f"• /collection - View your card collection\n"
             f"• /catch - Catch a spawned card\n"
-            f"• /check - Check card details\n\n"
+            f"• /cardinfo <id> - Check card details\n"
+            f"• /trades - View pending trades\n"
+            f"• /leaderboard - Top collectors\n\n"
             f"🔍 *Inline Search:*\n"
             f"Type `@{context.bot.username} ` in any chat to search cards!\n\n"
             f"🗄️ Database: {db_status}\n\n"
@@ -190,7 +198,7 @@ async def setup_bot() -> Application:
                 f"🎯 Total Catches: {stats['total_catches']:,}\n"
                 f"💬 Active Groups: {stats['active_groups']:,}\n\n"
                 f"🗄️ Database: ✅ Connected\n"
-                f"🔧 Version: 1.0.0",
+                f"🔧 Version: 1.0.0 (Part 4)",
                 parse_mode="Markdown"
             )
         else:
@@ -202,83 +210,33 @@ async def setup_bot() -> Application:
                 parse_mode="Markdown"
             )
     
-    async def harem_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handler for /harem command."""
-        if not update.message or not update.effective_user:
-            return
-        
-        if not db.is_connected:
-            await update.message.reply_text(
-                "⚠️ Database is currently offline. Please try again later.",
-                parse_mode="Markdown"
-            )
-            return
-        
-        user_id = update.effective_user.id
-        stats = await get_user_collection_stats(None, user_id)
-        
-        await update.message.reply_text(
-            f"🎴 *Your Collection*\n\n"
-            f"📦 Unique Cards: {stats['total_unique']}\n"
-            f"🎴 Total Cards: {stats['total_cards']}\n"
-            f"🧿 Mythical+: {stats['mythical_plus']}\n"
-            f"⚡ Legendary: {stats['legendary_count']}\n\n"
-            f"🔍 Use inline mode to browse:\n"
-            f"`@{context.bot.username} naruto`",
-            parse_mode="Markdown"
-        )
-    
-    async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handler for /check command."""
+    async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handler for /help command."""
         if not update.message:
             return
         
-        # Check if card ID is provided
-        if context.args and context.args[0].isdigit():
-            card_id = int(context.args[0])
-            
-            if db.is_connected:
-                from db import get_card_by_id
-                card = await get_card_by_id(None, card_id)
-                
-                if card:
-                    from utils.rarity import rarity_to_text
-                    rarity_name, rarity_prob, rarity_emoji = rarity_to_text(card["rarity"])
-                    
-                    caption = (
-                        f"{rarity_emoji} *{card['character_name']}*\n\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🎬 *Anime:* {card['anime']}\n"
-                        f"🆔 *ID:* `#{card['card_id']}`\n"
-                        f"✨ *Rarity:* {rarity_emoji} {rarity_name}\n"
-                        f"📊 *Drop Rate:* {rarity_prob}%\n"
-                        f"🎯 *Times Caught:* {card.get('total_caught', 0):,}\n"
-                        f"━━━━━━━━━━━━━━━━━━━━"
-                    )
-                    
-                    if card.get("photo_file_id"):
-                        await update.message.reply_photo(
-                            photo=card["photo_file_id"],
-                            caption=caption,
-                            parse_mode="Markdown"
-                        )
-                    else:
-                        await update.message.reply_text(caption, parse_mode="Markdown")
-                    return
-                else:
-                    await update.message.reply_text(
-                        f"❌ Card `#{card_id}` not found.",
-                        parse_mode="Markdown"
-                    )
-                    return
-        
         await update.message.reply_text(
-            "🔍 *Check Command*\n\n"
-            "Usage: `/check <card_id>`\n"
-            "View details about a specific card.\n\n"
-            "Example: `/check 1`\n\n"
-            "💡 You can also use inline search:\n"
-            f"`@{context.bot.username} #1`",
+            "📚 *LuLuCatch Bot Help*\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "*Basic Commands:*\n"
+            "• /start - Welcome message\n"
+            "• /info - Bot statistics\n"
+            "• /help - This help message\n\n"
+            "*Collection:*\n"
+            "• /collection - View your cards\n"
+            "• /cardinfo <id> - Card details\n\n"
+            "*Catching:*\n"
+            "• /catch - Catch spawned card\n"
+            "• Type character name to guess\n\n"
+            "*Trading:*\n"
+            "• /trades - View pending trades\n"
+            "• /offertrade <card_id> <user_id> - Offer trade\n"
+            "• /viewtrade <id> - View trade details\n\n"
+            "*Leaderboard:*\n"
+            "• /leaderboard - Top collectors\n\n"
+            "*Inline Mode:*\n"
+            "Type `@" + (context.bot.username or "bot") + " <query>` to search cards\n"
+            "━━━━━━━━━━━━━━━━━━━━",
             parse_mode="Markdown"
         )
     
@@ -311,9 +269,7 @@ async def setup_bot() -> Application:
     # Basic commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("info", info_command))
-    application.add_handler(CommandHandler("help", start_command))
-    application.add_handler(CommandHandler("check", check_command))
-    application.add_handler(CommandHandler("harem", harem_command))
+    application.add_handler(CommandHandler("help", help_command))
     
     # Catch commands
     application.add_handler(catch_command_handler)
@@ -359,6 +315,15 @@ async def setup_bot() -> Application:
     register_inline_callback_handlers(application)
     
     # ========================================
+    # Register Part 4 Handlers
+    # ========================================
+    
+    register_collection_handlers(application)
+    register_cardinfo_handlers(application)
+    register_trade_handlers(application)
+    register_leaderboard_handlers(application)
+    
+    # ========================================
     # Error Handler
     # ========================================
     
@@ -371,9 +336,12 @@ async def setup_bot() -> Application:
     commands = [
         BotCommand("start", "🚀 Start the bot"),
         BotCommand("info", "📊 Bot information"),
+        BotCommand("help", "📚 Help & commands"),
         BotCommand("catch", "🎯 Catch a card"),
-        BotCommand("harem", "🎴 Your collection"),
-        BotCommand("check", "🔍 Check card details"),
+        BotCommand("collection", "🎴 Your collection"),
+        BotCommand("cardinfo", "🔍 Card details"),
+        BotCommand("trades", "🔁 Pending trades"),
+        BotCommand("leaderboard", "🏆 Top collectors"),
     ]
     
     try:
@@ -574,48 +542,22 @@ async def webhook_handler(request: Request) -> Response:
 @app.get("/webhook")
 async def webhook_get():
     """GET endpoint for webhook verification."""
-    return {"status": "webhook endpoint active", "method": "POST required"}
-
-
-@app.get("/stats")
-async def get_stats():
-    """Get bot statistics (public endpoint)."""
-    if not db.is_connected:
-        return {"error": "Database not connected"}
-    
-    stats = await get_global_stats(None)
-    
-    return {
-        "users": stats["total_users"],
-        "cards": stats["total_cards"],
-        "catches": stats["total_catches"],
-        "groups": stats["active_groups"],
-    }
+    return {"status": "Webhook endpoint active"}
 
 
 # ============================================================
-# 🚀 Application Entry Point
+# 🚀 Run the application
 # ============================================================
 
-def main():
-    """
-    Main entry point for running the application.
-    """
+if __name__ == "__main__":
     # Set up logging
     setup_logging(debug=Config.DEBUG)
     
-    log_startup("Initializing LuLuCatch Card Bot...")
-    
-    # Run the FastAPI app with uvicorn
+    # Run FastAPI server
     uvicorn.run(
         "main:app",
         host=Config.HOST,
         port=Config.PORT,
-        reload=False,
-        log_level="info",
-        access_log=True,
+        reload=Config.DEBUG,
+        log_level="info"
     )
-
-
-if __name__ == "__main__":
-    main()
