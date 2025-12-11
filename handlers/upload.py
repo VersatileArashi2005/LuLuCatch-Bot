@@ -1326,6 +1326,7 @@ upload_conversation_handler = ConversationHandler(
             CallbackQueryHandler(upload_cancel_callback, pattern=r"^upload_cancel$"),
         ],
         PREVIEW_CONFIRM: [
+            # FIXED: Unique pattern for Confirm & Save
             CallbackQueryHandler(confirm_upload_callback, pattern=r"^upload_confirm$"),
             CallbackQueryHandler(show_edit_menu, pattern=r"^upload_edit$"),
             CallbackQueryHandler(edit_selection_callback, pattern=r"^upload_edit_"),
@@ -1338,11 +1339,13 @@ upload_conversation_handler = ConversationHandler(
     ],
     name="upload_conversation",
     persistent=False,
+    # ADDED: Set conversation_timeout to prevent stuck sessions
+    conversation_timeout=300,  # 5 minutes
 )
 
-# Separate rarity callback handler (for compatibility)
+# Separate rarity callback handler (for compatibility - not used in new flow)
 upload_rarity_callback_handler = CallbackQueryHandler(
-    lambda u, c: None,  # Not used in new flow
+    lambda u, c: None,  # Not used
     pattern=r"^upload_rarity_"
 )
 
