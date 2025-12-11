@@ -1,4 +1,4 @@
-# ===========================================================
+# ============================================================
 # 📁 File: handlers/upload.py
 # 📍 Location: telegram_card_bot/handlers/upload.py
 # 📝 Description: Enhanced card upload with photo-only duplicate detection
