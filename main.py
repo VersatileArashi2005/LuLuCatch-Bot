@@ -65,7 +65,6 @@ from handlers.catch import (
     clear_cheat_handler,
     view_cheaters_handler,
     battle_callback,
-    name_guess_message_handler,
 )
 
 # Import inline search handlers
@@ -332,7 +331,6 @@ async def setup_bot() -> Application:
     # ========================================
 
     # Name guess handler (disabled for security, but kept for compatibility)
-    application.add_handler(name_guess_message_handler)
 
     # ========================================
     # Register Inline Search Handlers
