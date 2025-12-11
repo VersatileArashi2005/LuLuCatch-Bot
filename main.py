@@ -50,10 +50,18 @@ from handlers.admin import (
     ban_command_handler,
     unban_command_handler,
     set_bot_start_time,
+    # New admin handlers
+    delete_command_handler,
+    delete_card_callback_handler,
+    edit_conversation_handler,
+    userinfo_command_handler,
+    user_management_callback_handler,
+    give_card_command_handler,
+    give_coins_command_handler,
 )
 from handlers.catch import (
     catch_command_handler,
-    battle_callback,  # CHANGED: was catch_callback_handler
+    battle_callback,
     force_spawn_handler,
     name_guess_message_handler,
 )
@@ -226,7 +234,7 @@ async def setup_bot() -> Application:
             "• /collection - View your cards\n"
             "• /cardinfo <id> - Card details\n\n"
             "*Catching:*\n"
-            "• /catch - Catch spawned card\n"
+            "• /catch - Battle for a card\n"
             "• Type character name to guess\n\n"
             "*Trading:*\n"
             "• /trades - View pending trades\n"
@@ -261,6 +269,7 @@ async def setup_bot() -> Application:
 
     application.add_handler(upload_conversation_handler)
     application.add_handler(broadcast_conversation_handler)
+    application.add_handler(edit_conversation_handler)  # NEW: Edit card conversation
 
     # ========================================
     # Register Command Handlers
@@ -282,6 +291,12 @@ async def setup_bot() -> Application:
     application.add_handler(unban_command_handler)
     application.add_handler(quick_upload_handler)
 
+    # NEW: Additional admin commands
+    application.add_handler(delete_command_handler)
+    application.add_handler(userinfo_command_handler)
+    application.add_handler(give_card_command_handler)
+    application.add_handler(give_coins_command_handler)
+
     # ========================================
     # Register Callback Query Handlers
     # ========================================
@@ -292,10 +307,16 @@ async def setup_bot() -> Application:
     # Admin panel callbacks
     application.add_handler(CallbackQueryHandler(
         admin_callback_handler,
-        pattern=r"^admin_"
+        pattern=r"^admin_(?!delcard_|user_|edit_)"  # Exclude new patterns
     ))
 
-    # Battle callbacks (CHANGED: updated pattern for battle system)
+    # NEW: Delete card callbacks
+    application.add_handler(delete_card_callback_handler)
+
+    # NEW: User management callbacks
+    application.add_handler(user_management_callback_handler)
+
+    # Battle callbacks
     application.add_handler(battle_callback)
 
     # ========================================
@@ -346,7 +367,7 @@ async def setup_bot() -> Application:
     except Exception as e:
         error_logger.error(f"Failed to set commands: {e}")
 
-    log_startup("✅ Bot application configured with battle system")
+    log_startup("✅ Bot application configured with battle system and admin commands")
 
     return application
 
