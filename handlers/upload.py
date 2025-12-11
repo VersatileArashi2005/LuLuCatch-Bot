@@ -1,11 +1,12 @@
 # ============================================================
 # 📁 File: handlers/upload.py
 # 📍 Location: telegram_card_bot/handlers/upload.py
-# 📝 Description: Enhanced card upload system with anime/character selection
+# 📝 Description: Enhanced card upload with image-hash duplicate detection
 # ============================================================
 
 from datetime import datetime
 from typing import Optional, Dict, Any, List
+import hashlib
 
 from telegram import (
     Update,
@@ -86,6 +87,7 @@ def init_upload_session(context: ContextTypes.DEFAULT_TYPE) -> None:
         'character': None,
         'rarity': None,
         'photo_file_id': None,
+        'photo_hash': None,
         'started_at': datetime.now()
     }
 
@@ -130,7 +132,11 @@ async def get_existing_anime_list() -> List[str]:
 
 
 async def get_characters_for_anime(anime: str) -> List[str]:
-    """Get list of characters for a specific anime."""
+    """
+    Get list of characters for a specific anime.
+    Note: Characters are NOT unique - same name can appear multiple times.
+    This returns distinct names for selection purposes.
+    """
     if not db.is_connected:
         return []
     
@@ -147,21 +153,48 @@ async def get_characters_for_anime(anime: str) -> List[str]:
         return []
 
 
-async def check_card_exists(anime: str, character: str) -> bool:
-    """Check if a card already exists."""
+async def check_photo_exists(photo_file_id: str) -> tuple[bool, Optional[int]]:
+    """
+    Check if a photo (by file_id) already exists in the database.
+    
+    Args:
+        photo_file_id: Telegram file ID
+        
+    Returns:
+        Tuple of (exists: bool, existing_card_id: Optional[int])
+    """
     if not db.is_connected:
-        return False
+        return False, None
     
     try:
         query = """
-            SELECT EXISTS(
-                SELECT 1 FROM cards 
-                WHERE anime = $1 AND character_name = $2
-            )
+            SELECT card_id, character_name, anime 
+            FROM cards 
+            WHERE photo_file_id = $1 AND is_active = TRUE
+            LIMIT 1
         """
-        return await db.fetchval(query, anime, character)
-    except Exception:
-        return False
+        result = await db.fetchrow(query, photo_file_id)
+        
+        if result:
+            return True, result['card_id']
+        return False, None
+        
+    except Exception as e:
+        error_logger.error(f"Error checking photo existence: {e}")
+        return False, None
+
+
+def generate_photo_hash(file_id: str) -> str:
+    """
+    Generate a hash from the file_id for duplicate detection.
+    
+    Args:
+        file_id: Telegram file ID
+        
+    Returns:
+        SHA256 hash of the file_id
+    """
+    return hashlib.sha256(file_id.encode()).hexdigest()
 
 
 # ============================================================
@@ -236,10 +269,16 @@ async def show_anime_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     # Build keyboard
     keyboard = []
     
-    # Add existing anime (max 10 per page, can extend with pagination)
+    # Add existing anime (max 10 per page)
     for anime in anime_list[:10]:
         keyboard.append([
             InlineKeyboardButton(f"🎬 {anime}", callback_data=f"upload_anime_select:{anime}")
+        ])
+    
+    # Show "More..." if there are more than 10
+    if len(anime_list) > 10:
+        keyboard.append([
+            InlineKeyboardButton(f"📄 More ({len(anime_list) - 10} more)...", callback_data="upload_anime_more")
         ])
     
     # Add "New Anime" button
@@ -257,7 +296,8 @@ async def show_anime_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     text = (
         "📤 *Card Upload - Step 1/5*\n\n"
         "🎬 *Choose Anime for this card:*\n\n"
-        "Select an existing anime or add a new one."
+        "Select an existing anime or add a new one.\n\n"
+        "💡 Anime names must be unique."
     )
     
     if update.callback_query:
@@ -287,11 +327,17 @@ async def anime_selected_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(
             "📤 *Card Upload - Step 1/5*\n\n"
             "🎬 *Enter the new Anime name:*\n\n"
-            "Type the anime/series name or /cancel to abort.",
+            "Type the anime/series name or /cancel to abort.\n\n"
+            "⚠️ Anime names must be unique in the database.",
             parse_mode="Markdown"
         )
         await query.answer()
         return ADD_NEW_ANIME
+    
+    elif data == "upload_anime_more":
+        # TODO: Implement pagination for large anime lists
+        await query.answer("Pagination coming soon! Use 'Add New Anime' for now.", show_alert=True)
+        return SELECT_ANIME
     
     elif data.startswith("upload_anime_select:"):
         # Extract anime name
@@ -329,6 +375,17 @@ async def anime_text_received(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return ADD_NEW_ANIME
     
+    # Check if anime already exists (must be unique)
+    existing_anime = await get_existing_anime_list()
+    if anime_name in existing_anime:
+        await update.message.reply_text(
+            f"⚠️ *Anime Already Exists*\n\n"
+            f"An anime named *{anime_name}* is already in the database.\n\n"
+            f"Please select it from the list or enter a different name:",
+            parse_mode="Markdown"
+        )
+        return ADD_NEW_ANIME
+    
     # Save anime
     update_upload_data(context, anime=anime_name)
     
@@ -354,10 +411,16 @@ async def show_character_selection(update: Update, context: ContextTypes.DEFAULT
     # Build keyboard
     keyboard = []
     
-    # Add existing characters
+    # Add existing characters (showing they can be reused)
     for character in character_list[:10]:
         keyboard.append([
             InlineKeyboardButton(f"👤 {character}", callback_data=f"upload_char_select:{character}")
+        ])
+    
+    # Show more if needed
+    if len(character_list) > 10:
+        keyboard.append([
+            InlineKeyboardButton(f"📄 More ({len(character_list) - 10} more)...", callback_data="upload_char_more")
         ])
     
     # Add "New Character" button
@@ -377,7 +440,8 @@ async def show_character_selection(update: Update, context: ContextTypes.DEFAULT
         "📤 *Card Upload - Step 2/5*\n\n"
         f"🎬 *Anime:* {anime}\n\n"
         "👤 *Choose Character for this card:*\n\n"
-        "Select an existing character or add a new one."
+        "Select an existing character or add a new one.\n\n"
+        "💡 Characters can be reused (different poses/rarities)."
     )
     
     if update.callback_query:
@@ -409,12 +473,17 @@ async def character_selected_callback(update: Update, context: ContextTypes.DEFA
         await query.edit_message_text(
             "📤 *Card Upload - Step 2/5*\n\n"
             f"🎬 *Anime:* {anime}\n\n"
-            "👤 *Enter the new Character name:*\n\n"
-            "Type the character name or /cancel to abort.",
+            "👤 *Enter the Character name:*\n\n"
+            "Type the character name or /cancel to abort.\n\n"
+            "💡 Same character can be used for multiple cards.",
             parse_mode="Markdown"
         )
         await query.answer()
         return ADD_NEW_CHARACTER
+    
+    elif data == "upload_char_more":
+        await query.answer("Pagination coming soon!", show_alert=True)
+        return SELECT_CHARACTER
     
     elif data.startswith("upload_char_select:"):
         # Extract character name
@@ -423,18 +492,7 @@ async def character_selected_callback(update: Update, context: ContextTypes.DEFA
         
         app_logger.info(f"📤 User selected character: {character}")
         
-        # Check if card already exists
-        upload_data = get_upload_data(context)
-        anime = upload_data.get('anime')
-        
-        if await check_card_exists(anime, character):
-            await query.answer(
-                "⚠️ This card already exists in the database!",
-                show_alert=True
-            )
-            return await show_character_selection(update, context)
-        
-        # Move to rarity selection
+        # Move to rarity selection (no duplicate check here)
         return await show_rarity_selection(update, context)
     
     elif data == "upload_back_anime":
@@ -467,23 +525,11 @@ async def character_text_received(update: Update, context: ContextTypes.DEFAULT_
         )
         return ADD_NEW_CHARACTER
     
-    # Check if card already exists
-    upload_data = get_upload_data(context)
-    anime = upload_data.get('anime')
-    
-    if await check_card_exists(anime, character_name):
-        await update.message.reply_text(
-            "⚠️ *Card Already Exists*\n\n"
-            f"A card for *{character_name}* from *{anime}* already exists.\n\n"
-            "Please enter a different character name:",
-            parse_mode="Markdown"
-        )
-        return ADD_NEW_CHARACTER
-    
+    # No duplicate check for characters - they can be reused!
     # Save character
     update_upload_data(context, character=character_name)
     
-    app_logger.info(f"📤 User added new character: {character_name}")
+    app_logger.info(f"📤 User added character: {character_name}")
     
     # Move to rarity selection
     return await show_rarity_selection(update, context)
@@ -624,7 +670,8 @@ async def show_photo_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"✨ *Rarity:* {rarity_emoji} {rarity_name}\n\n"
         "🖼️ *Send the card photo:*\n\n"
         "Send an image (as photo, not document).\n"
-        "💡 Best quality: PNG or JPG, under 5MB"
+        "💡 Best quality: PNG or JPG, under 5MB\n\n"
+        "⚠️ Duplicate photos will be detected."
     )
     
     if update.callback_query:
@@ -678,10 +725,15 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return UPLOAD_PHOTO
     
-    # Save photo file ID
-    update_upload_data(context, photo_file_id=photo_file_id)
+    # Generate hash for this photo
+    photo_hash = generate_photo_hash(photo_file_id)
     
-    # Show preview
+    # Save photo file ID and hash
+    update_upload_data(context, photo_file_id=photo_file_id, photo_hash=photo_hash)
+    
+    app_logger.info(f"📤 Photo saved with hash: {photo_hash[:16]}...")
+    
+    # Show preview (duplicate check happens on confirm)
     return await show_preview(update, context)
 
 
@@ -708,7 +760,8 @@ async def show_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         f"👤 *Character:* {character}\n"
         f"✨ *Rarity:* {rarity_emoji} {rarity_name} ({rarity_prob}%)\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Press *Confirm & Save* to add this card to the database."
+        "Press *Confirm & Save* to add this card.\n\n"
+        "⚠️ Duplicate check will run on confirmation."
     )
     
     # Build keyboard
@@ -746,11 +799,11 @@ async def show_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 
 # ============================================================
-# 🟩 Step 6: Confirm & Save
+# 🟩 Step 6: Confirm & Save (with Duplicate Detection)
 # ============================================================
 
 async def confirm_upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle upload confirmation."""
+    """Handle upload confirmation with photo duplicate detection."""
     query = update.callback_query
     user = query.from_user
     
@@ -760,7 +813,40 @@ async def confirm_upload_callback(update: Update, context: ContextTypes.DEFAULT_
     rarity = upload_data.get('rarity')
     photo_file_id = upload_data.get('photo_file_id')
     
-    # Save card to database
+    # ========================================
+    # DUPLICATE CHECK: Photo-based only
+    # ========================================
+    
+    await query.answer("Checking for duplicates...")
+    
+    photo_exists, existing_card_id = await check_photo_exists(photo_file_id)
+    
+    if photo_exists:
+        # Photo already uploaded!
+        await query.edit_message_caption(
+            caption=(
+                "⚠️ *Duplicate Photo Detected!*\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"This exact photo already exists as Card `#{existing_card_id}`.\n\n"
+                "Please upload a different image or cancel.\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "💡 Tip: Same character is allowed, but not the same photo."
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Upload New Photo", callback_data="upload_edit_photo")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")]
+            ])
+        )
+        
+        app_logger.warning(f"📤 Duplicate photo detected: {photo_file_id} (Card #{existing_card_id})")
+        
+        return PREVIEW_CONFIRM
+    
+    # ========================================
+    # No duplicate - proceed with save
+    # ========================================
+    
     try:
         card = await add_card(
             pool=None,
@@ -774,7 +860,9 @@ async def confirm_upload_callback(update: Update, context: ContextTypes.DEFAULT_
         )
         
         if card is None:
-            await query.answer("⚠️ Card already exists!", show_alert=True)
+            # This shouldn't happen now (we removed anime+character uniqueness)
+            # But keep as fallback
+            await query.answer("⚠️ Failed to save card!", show_alert=True)
             clear_upload_data(context)
             return ConversationHandler.END
         
@@ -968,7 +1056,8 @@ async def quick_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "`/quickupload Anime | Character | Rarity`\n\n"
             "Examples:\n"
             "`/quickupload Naruto | Naruto Uzumaki | 5`\n"
-            "`/quickupload One Piece | Luffy | Legendary`",
+            "`/quickupload One Piece | Luffy | Legendary`\n\n"
+            "💡 Characters can be duplicated (different poses).",
             parse_mode="Markdown"
         )
         return
@@ -1011,6 +1100,18 @@ async def quick_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         rarity_id = get_random_rarity()
 
     photo_file_id = message.reply_to_message.photo[-1].file_id
+    
+    # Check for duplicate photo
+    photo_exists, existing_card_id = await check_photo_exists(photo_file_id)
+    
+    if photo_exists:
+        await message.reply_text(
+            f"⚠️ *Duplicate Photo Detected!*\n\n"
+            f"This photo already exists as Card `#{existing_card_id}`.\n\n"
+            f"Please use a different image.",
+            parse_mode="Markdown"
+        )
+        return
 
     try:
         card = await add_card(
@@ -1033,7 +1134,7 @@ async def quick_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 parse_mode="Markdown"
             )
         else:
-            await message.reply_text("⚠️ Card already exists!")
+            await message.reply_text("⚠️ Failed to save card!")
 
     except Exception as e:
         error_logger.error(f"Quick upload failed: {e}", exc_info=True)
@@ -1090,9 +1191,9 @@ upload_conversation_handler = ConversationHandler(
     persistent=False,
 )
 
-# Separate rarity callback handler (for old cards if needed)
+# Separate rarity callback handler (for compatibility)
 upload_rarity_callback_handler = CallbackQueryHandler(
-    lambda u, c: None,  # Placeholder - not used in new flow
+    lambda u, c: None,  # Not used in new flow
     pattern=r"^upload_rarity_"
 )
 
