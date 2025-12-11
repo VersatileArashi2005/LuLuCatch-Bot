@@ -672,8 +672,9 @@ async def delete_card_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
         try:
             # Delete from collections first (foreign key constraint)
-            deleted_from_collections = await db.execute(
-                "DELETE FROM user_cards WHERE card_id = $1",
+            # FIXED: Use 'collections' table instead of 'user_cards'
+            await db.execute(
+                "DELETE FROM collections WHERE card_id = $1",
                 card_id
             )
 
@@ -1000,16 +1001,16 @@ async def userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    # Get user data
+    # Get user data - FIXED: Use 'collections' table
     try:
         user_data = await db.fetchrow(
             """
             SELECT u.*, 
-                   COUNT(uc.id) as card_count,
-                   COALESCE(SUM(CASE WHEN c.rarity = 5 THEN 1 ELSE 0 END), 0) as legendary_count
+                   COUNT(c.collection_id) as card_count,
+                   COALESCE(SUM(CASE WHEN ca.rarity >= 10 THEN 1 ELSE 0 END), 0) as legendary_count
             FROM users u
-            LEFT JOIN user_cards uc ON u.user_id = uc.user_id
-            LEFT JOIN cards c ON uc.card_id = c.card_id
+            LEFT JOIN collections c ON u.user_id = c.user_id
+            LEFT JOIN cards ca ON c.card_id = ca.card_id
             WHERE u.user_id = $1
             GROUP BY u.user_id
             """,
@@ -1105,7 +1106,8 @@ async def user_management_callback(update: Update, context: ContextTypes.DEFAULT
         target_id = int(data.replace("admin_user_resetcards_", ""))
 
         try:
-            await db.execute("DELETE FROM user_cards WHERE user_id = $1", target_id)
+            # FIXED: Use 'collections' table instead of 'user_cards'
+            await db.execute("DELETE FROM collections WHERE user_id = $1", target_id)
 
             await query.edit_message_text(
                 f"✅ *Cards Reset*\n\n"
@@ -1139,8 +1141,8 @@ async def user_management_callback(update: Update, context: ContextTypes.DEFAULT
         target_id = int(data.replace("admin_user_resetall_", ""))
 
         try:
-            # Delete all cards
-            await db.execute("DELETE FROM user_cards WHERE user_id = $1", target_id)
+            # FIXED: Use 'collections' table instead of 'user_cards'
+            await db.execute("DELETE FROM collections WHERE user_id = $1", target_id)
             # Reset coins and stats
             await db.execute(
                 "UPDATE users SET coins = 0, total_catches = 0 WHERE user_id = $1",
