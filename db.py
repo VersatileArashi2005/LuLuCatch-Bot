@@ -335,7 +335,39 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
         log_database("✅ Groups table ready")
         
         # ========================================
-        # 5. Add Constraints (safely ignore if exist)
+        # 5. Create Trades Table (Part 4)
+        # ========================================
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                id SERIAL PRIMARY KEY,
+                from_user BIGINT NOT NULL,
+                to_user BIGINT NOT NULL,
+                offered_card_id INTEGER NOT NULL,
+                requested_card_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                CONSTRAINT valid_status CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed', 'failed')),
+                CONSTRAINT no_self_trade CHECK (from_user != to_user)
+            )
+        """)
+        log_database("✅ Trades table ready")
+        
+        # ========================================
+        # 6. Create Stats Table (Part 4)
+        # ========================================
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS stats (
+                id SERIAL PRIMARY KEY,
+                key TEXT UNIQUE NOT NULL,
+                value BIGINT DEFAULT 0,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        log_database("✅ Stats table ready")
+        
+        # ========================================
+        # 7. Add Constraints (safely ignore if exist)
         # ========================================
         
         # Unique constraint: cards (anime + character_name)
@@ -346,7 +378,7 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
                 UNIQUE (anime, character_name)
             """)
         except (DuplicateTableError, DuplicateObjectError, PostgresError):
-            pass  # Constraint already exists
+            pass
         
         # Unique constraint: collections (user_id + card_id)
         try:
@@ -356,9 +388,9 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
                 UNIQUE (user_id, card_id)
             """)
         except (DuplicateTableError, DuplicateObjectError, PostgresError):
-            pass  # Constraint already exists
+            pass
         
-        # Foreign key: collections.user_id -> users.user_id
+        # Foreign keys for collections
         try:
             await db.execute("""
                 ALTER TABLE collections 
@@ -366,9 +398,8 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
                 FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
             """)
         except (DuplicateTableError, DuplicateObjectError, PostgresError):
-            pass  # Constraint already exists
+            pass
         
-        # Foreign key: collections.card_id -> cards.card_id
         try:
             await db.execute("""
                 ALTER TABLE collections 
@@ -376,14 +407,52 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
                 FOREIGN KEY (card_id) REFERENCES cards(card_id) ON DELETE CASCADE
             """)
         except (DuplicateTableError, DuplicateObjectError, PostgresError):
-            pass  # Constraint already exists
+            pass
+        
+        # Foreign keys for trades
+        try:
+            await db.execute("""
+                ALTER TABLE trades 
+                ADD CONSTRAINT fk_trades_from_user 
+                FOREIGN KEY (from_user) REFERENCES users(user_id) ON DELETE CASCADE
+            """)
+        except (DuplicateTableError, DuplicateObjectError, PostgresError):
+            pass
+        
+        try:
+            await db.execute("""
+                ALTER TABLE trades 
+                ADD CONSTRAINT fk_trades_to_user 
+                FOREIGN KEY (to_user) REFERENCES users(user_id) ON DELETE CASCADE
+            """)
+        except (DuplicateTableError, DuplicateObjectError, PostgresError):
+            pass
+        
+        try:
+            await db.execute("""
+                ALTER TABLE trades 
+                ADD CONSTRAINT fk_trades_offered_card 
+                FOREIGN KEY (offered_card_id) REFERENCES cards(card_id) ON DELETE CASCADE
+            """)
+        except (DuplicateTableError, DuplicateObjectError, PostgresError):
+            pass
+        
+        try:
+            await db.execute("""
+                ALTER TABLE trades 
+                ADD CONSTRAINT fk_trades_requested_card 
+                FOREIGN KEY (requested_card_id) REFERENCES cards(card_id) ON DELETE SET NULL
+            """)
+        except (DuplicateTableError, DuplicateObjectError, PostgresError):
+            pass
         
         log_database("✅ Constraints ready")
         
         # ========================================
-        # 6. Create Indexes (IF NOT EXISTS handles duplicates)
+        # 8. Create Indexes
         # ========================================
         
+        # Collection indexes
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_collections_user_id 
             ON collections(user_id)
@@ -392,6 +461,8 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
             CREATE INDEX IF NOT EXISTS idx_collections_card_id 
             ON collections(card_id)
         """)
+        
+        # Card indexes
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_cards_rarity 
             ON cards(rarity)
@@ -404,16 +475,51 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
             CREATE INDEX IF NOT EXISTS idx_cards_active 
             ON cards(is_active) WHERE is_active = TRUE
         """)
+        
+        # Group indexes
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_groups_active 
             ON groups(is_active) WHERE is_active = TRUE
         """)
+        
+        # User indexes
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_users_banned 
             ON users(is_banned) WHERE is_banned = FALSE
         """)
         
+        # Trade indexes (Part 4)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_trades_to_user 
+            ON trades(to_user)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_trades_from_user 
+            ON trades(from_user)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_trades_status 
+            ON trades(status)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_trades_pending 
+            ON trades(to_user, status) WHERE status = 'pending'
+        """)
+        
         log_database("✅ Indexes ready")
+        
+        # ========================================
+        # 9. Insert Default Stats
+        # ========================================
+        await db.execute("""
+            INSERT INTO stats (key, value) VALUES
+                ('total_trades', 0),
+                ('total_catches_today', 0),
+                ('total_spawns_today', 0)
+            ON CONFLICT (key) DO NOTHING
+        """)
+        log_database("✅ Default stats inserted")
+        
         log_database("✅ Database schema initialized successfully")
         return True
         
@@ -597,11 +703,11 @@ async def add_card(
     """
     if not db.is_connected:
         return None
-    
+
     # Validate rarity
     if not 1 <= rarity <= 11:
         raise ValueError(f"Invalid rarity: {rarity}. Must be between 1 and 11.")
-    
+
     query = """
         INSERT INTO cards (anime, character_name, rarity, photo_file_id, uploader_id, description, tags)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -629,7 +735,7 @@ async def get_card_by_id(
     """
     if not db.is_connected:
         return None
-    
+
     query = "SELECT * FROM cards WHERE card_id = $1 AND is_active = TRUE"
     return await db.fetchrow(query, card_id)
 
@@ -650,7 +756,7 @@ async def get_cards_by_ids(
     """
     if not db.is_connected or not card_ids:
         return []
-    
+
     query = """
         SELECT * FROM cards 
         WHERE card_id = ANY($1) AND is_active = TRUE
@@ -675,7 +781,7 @@ async def get_random_card(
     """
     if not db.is_connected:
         return None
-    
+
     if rarity:
         query = """
             SELECT * FROM cards 
@@ -712,7 +818,7 @@ async def search_cards(
     """
     if not db.is_connected:
         return []
-    
+
     query = """
         SELECT * FROM cards
         WHERE is_active = TRUE
@@ -731,7 +837,7 @@ async def get_card_count(pool: Optional[Pool]) -> int:
     """Get total number of active cards."""
     if not db.is_connected:
         return 0
-    
+
     query = "SELECT COUNT(*) FROM cards WHERE is_active = TRUE"
     result = await db.fetchval(query)
     return result or 0
@@ -744,7 +850,7 @@ async def increment_card_caught(
     """Increment the total_caught counter for a card."""
     if not db.is_connected:
         return
-    
+
     query = "UPDATE cards SET total_caught = total_caught + 1 WHERE card_id = $1"
     await db.execute(query, card_id)
 
@@ -765,7 +871,7 @@ async def delete_card(
     """
     if not db.is_connected:
         return False
-    
+
     query = "UPDATE cards SET is_active = FALSE WHERE card_id = $1 RETURNING card_id"
     result = await db.fetchrow(query, card_id)
     return result is not None
@@ -795,7 +901,7 @@ async def add_to_collection(
     """
     if not db.is_connected:
         return None
-    
+
     query = """
         INSERT INTO collections (user_id, card_id, caught_in_group)
         VALUES ($1, $2, $3)
@@ -829,9 +935,9 @@ async def get_user_collection(
     """
     if not db.is_connected:
         return [], 0
-    
+
     offset = (page - 1) * per_page
-    
+
     if rarity_filter:
         count_query = """
             SELECT COUNT(*) FROM collections c
@@ -866,7 +972,7 @@ async def get_user_collection(
         """
         total = await db.fetchval(count_query, user_id)
         cards = await db.fetch(main_query, user_id, per_page, offset)
-    
+
     return cards, total or 0
 
 
@@ -891,7 +997,7 @@ async def get_user_collection_stats(
             "mythical_plus": 0,
             "legendary_count": 0,
         }
-    
+
     query = """
         SELECT 
             COUNT(*) as total_unique,
@@ -902,9 +1008,9 @@ async def get_user_collection_stats(
         JOIN cards ca ON c.card_id = ca.card_id
         WHERE c.user_id = $1 AND ca.is_active = TRUE
     """
-    
+
     row = await db.fetchrow(query, user_id)
-    
+
     if row:
         return {
             "total_unique": row["total_unique"] or 0,
@@ -928,7 +1034,7 @@ async def check_user_has_card(
     """Check if a user has a specific card in their collection."""
     if not db.is_connected:
         return False
-    
+
     query = """
         SELECT EXISTS(
             SELECT 1 FROM collections 
@@ -951,7 +1057,7 @@ async def toggle_favorite(
     """
     if not db.is_connected:
         return None
-    
+
     query = """
         UPDATE collections 
         SET is_favorite = NOT is_favorite
@@ -983,7 +1089,7 @@ async def ensure_group(
     """
     if not db.is_connected:
         return None
-    
+
     query = """
         INSERT INTO groups (group_id, group_name)
         VALUES ($1, $2)
@@ -1011,12 +1117,12 @@ async def get_all_groups(
     """
     if not db.is_connected:
         return []
-    
+
     if active_only:
         query = "SELECT * FROM groups WHERE is_active = TRUE ORDER BY joined_at"
     else:
         query = "SELECT * FROM groups ORDER BY joined_at"
-    
+
     return await db.fetch(query)
 
 
@@ -1027,7 +1133,7 @@ async def get_group_by_id(
     """Get a specific group by ID."""
     if not db.is_connected:
         return None
-    
+
     query = "SELECT * FROM groups WHERE group_id = $1"
     return await db.fetchrow(query, group_id)
 
@@ -1049,7 +1155,7 @@ async def update_group_spawn(
     """
     if not db.is_connected:
         return
-    
+
     query = """
         UPDATE groups SET
             current_card_id = $2,
@@ -1068,7 +1174,7 @@ async def clear_group_spawn(
     """Clear the current spawned card in a group after it's caught."""
     if not db.is_connected:
         return
-    
+
     query = """
         UPDATE groups SET
             current_card_id = NULL,
@@ -1099,24 +1205,24 @@ async def update_group_settings(
     """
     if not db.is_connected:
         return None
-    
+
     updates = []
     values = [group_id]
     param_count = 1
-    
+
     if spawn_enabled is not None:
         param_count += 1
         updates.append(f"spawn_enabled = ${param_count}")
         values.append(spawn_enabled)
-    
+
     if cooldown_seconds is not None:
         param_count += 1
         updates.append(f"cooldown_seconds = ${param_count}")
         values.append(cooldown_seconds)
-    
+
     if not updates:
         return await get_group_by_id(pool, group_id)
-    
+
     query = f"""
         UPDATE groups SET {', '.join(updates)}
         WHERE group_id = $1
@@ -1132,7 +1238,7 @@ async def deactivate_group(
     """Mark a group as inactive (bot left/kicked)."""
     if not db.is_connected:
         return
-    
+
     query = "UPDATE groups SET is_active = FALSE WHERE group_id = $1"
     await db.execute(query, group_id)
 
@@ -1155,32 +1261,32 @@ async def get_global_stats(pool: Optional[Pool]) -> dict:
             "total_catches": 0,
             "active_groups": 0,
         }
-    
+
     try:
         stats = {}
-        
+
         # Total users
         stats["total_users"] = await db.fetchval(
             "SELECT COUNT(*) FROM users"
         ) or 0
-        
+
         # Total active cards
         stats["total_cards"] = await db.fetchval(
             "SELECT COUNT(*) FROM cards WHERE is_active = TRUE"
         ) or 0
-        
+
         # Total catches
         stats["total_catches"] = int(await db.fetchval(
             "SELECT COALESCE(SUM(total_catches), 0) FROM users"
         ) or 0)
-        
+
         # Active groups
         stats["active_groups"] = await db.fetchval(
             "SELECT COUNT(*) FROM groups WHERE is_active = TRUE"
         ) or 0
-        
+
         return stats
-        
+
     except Exception as e:
         error_logger.error(f"Error getting global stats: {e}")
         return {
@@ -1200,7 +1306,7 @@ async def get_rarity_distribution(pool: Optional[Pool]) -> List[Record]:
     """
     if not db.is_connected:
         return []
-    
+
     query = """
         SELECT rarity, COUNT(*) as count
         FROM cards
@@ -1223,7 +1329,7 @@ async def get_top_catchers(
     """
     if not db.is_connected:
         return []
-    
+
     query = """
         SELECT user_id, username, first_name, total_catches, level, coins
         FROM users
@@ -1246,7 +1352,7 @@ async def get_rarest_cards(
     """
     if not db.is_connected:
         return []
-    
+
     query = """
         SELECT * FROM cards
         WHERE is_active = TRUE
@@ -1276,7 +1382,7 @@ async def cleanup_inactive_groups(
     """
     if not db.is_connected:
         return 0
-    
+
     query = f"""
         UPDATE groups SET is_active = FALSE
         WHERE last_spawn < NOW() - INTERVAL '{days_inactive} days'
@@ -1296,7 +1402,7 @@ async def health_check(pool: Optional[Pool]) -> bool:
     """
     if not db.is_connected:
         return False
-    
+
     try:
         await db.fetchval("SELECT 1")
         return True
@@ -1314,7 +1420,7 @@ async def get_database_size(pool: Optional[Pool]) -> Optional[str]:
     """
     if not db.is_connected:
         return None
-    
+
     try:
         query = "SELECT pg_size_pretty(pg_database_size(current_database()))"
         return await db.fetchval(query)
@@ -1331,115 +1437,21 @@ async def get_table_counts(pool: Optional[Pool]) -> dict:
     """
     if not db.is_connected:
         return {}
-    
+
     try:
         return {
             "users": await db.fetchval("SELECT COUNT(*) FROM users") or 0,
             "cards": await db.fetchval("SELECT COUNT(*) FROM cards") or 0,
             "collections": await db.fetchval("SELECT COUNT(*) FROM collections") or 0,
             "groups": await db.fetchval("SELECT COUNT(*) FROM groups") or 0,
+            "trades": await db.fetchval("SELECT COUNT(*) FROM trades") or 0,
         }
     except Exception:
         return {}
 
 
--- ============================================================
--- Part 4: Database Migration SQL
--- Add to your PostgreSQL database
--- ============================================================
-
--- ========================================
--- 1. TRADES TABLE - Store trade requests
--- ========================================
-CREATE TABLE IF NOT EXISTS trades (
-    trade_id SERIAL PRIMARY KEY,
-    from_user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    to_user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    offered_card_id INTEGER NOT NULL REFERENCES cards(card_id) ON DELETE CASCADE,
-    requested_card_id INTEGER REFERENCES cards(card_id) ON DELETE SET NULL,
-    status VARCHAR(20) NOT NULL DEFAULT 'pending',
-    message TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    completed_at TIMESTAMP WITH TIME ZONE,
-    
-    -- Constraints
-    CONSTRAINT valid_status CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed', 'failed')),
-    CONSTRAINT no_self_trade CHECK (from_user_id != to_user_id)
-);
-
--- ========================================
--- 2. STATS TABLE - Aggregated statistics
--- ========================================
-CREATE TABLE IF NOT EXISTS stats (
-    stat_id SERIAL PRIMARY KEY,
-    stat_key VARCHAR(100) UNIQUE NOT NULL,
-    stat_value BIGINT DEFAULT 0,
-    description TEXT,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- ========================================
--- 3. TRADE HISTORY TABLE - Completed trades log
--- ========================================
-CREATE TABLE IF NOT EXISTS trade_history (
-    history_id SERIAL PRIMARY KEY,
-    trade_id INTEGER NOT NULL,
-    from_user_id BIGINT NOT NULL,
-    to_user_id BIGINT NOT NULL,
-    offered_card_id INTEGER NOT NULL,
-    requested_card_id INTEGER,
-    completed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- ========================================
--- 4. INDEXES for Performance
--- ========================================
-
--- Trades indexes
-CREATE INDEX IF NOT EXISTS idx_trades_from_user ON trades(from_user_id);
-CREATE INDEX IF NOT EXISTS idx_trades_to_user ON trades(to_user_id);
-CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
-CREATE INDEX IF NOT EXISTS idx_trades_pending ON trades(to_user_id, status) WHERE status = 'pending';
-
--- Stats index
-CREATE INDEX IF NOT EXISTS idx_stats_key ON stats(stat_key);
-
--- ========================================
--- 5. INSERT DEFAULT STATS
--- ========================================
-INSERT INTO stats (stat_key, stat_value, description) VALUES
-    ('total_trades', 0, 'Total completed trades'),
-    ('total_catches_today', 0, 'Cards caught today'),
-    ('total_spawns_today', 0, 'Cards spawned today'),
-    ('last_stats_update', 0, 'Timestamp of last stats update')
-ON CONFLICT (stat_key) DO NOTHING;
-
--- ========================================
--- 6. FUNCTION: Update trade timestamp
--- ========================================
-CREATE OR REPLACE FUNCTION update_trade_timestamp()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Trigger for trades table
-DROP TRIGGER IF EXISTS trigger_update_trade_timestamp ON trades;
-CREATE TRIGGER trigger_update_trade_timestamp
-    BEFORE UPDATE ON trades
-    FOR EACH ROW
-    EXECUTE FUNCTION update_trade_timestamp();
-
 # ============================================================
-# 📦 PART 4: Additional DB Helper Functions
-# Add these to the END of your db.py file
-# ============================================================
-
-# ============================================================
-# 📦 Collection Functions (Enhanced)
+# 📦 PART 4: Collection Functions (Enhanced)
 # ============================================================
 
 async def get_collection_cards(
@@ -1465,7 +1477,7 @@ async def get_collection_cards(
     """
     if not db.is_connected:
         return []
-    
+
     try:
         if rarity_filter:
             query = """
@@ -1537,7 +1549,7 @@ async def get_collection_count(
     """
     if not db.is_connected:
         return 0
-    
+
     try:
         if rarity_filter:
             query = """
@@ -1558,7 +1570,7 @@ async def get_collection_count(
                   AND c.quantity > 0
             """
             result = await db.fetchval(query, user_id)
-        
+
         return result or 0
     except Exception as e:
         error_logger.error(f"Error getting collection count: {e}", exc_info=True)
@@ -1581,7 +1593,7 @@ async def get_card_with_details(
     """
     if not db.is_connected:
         return None
-    
+
     try:
         query = """
             SELECT 
@@ -1615,7 +1627,7 @@ async def get_card_owners(
     """
     if not db.is_connected:
         return []
-    
+
     try:
         query = """
             SELECT 
@@ -1657,7 +1669,7 @@ async def check_user_owns_card(
     """
     if not db.is_connected:
         return False
-    
+
     try:
         query = """
             SELECT quantity FROM collections
@@ -1688,7 +1700,7 @@ async def get_user_card_quantity(
     """
     if not db.is_connected:
         return 0
-    
+
     try:
         query = "SELECT quantity FROM collections WHERE user_id = $1 AND card_id = $2"
         result = await db.fetchval(query, user_id, card_id)
@@ -1699,45 +1711,43 @@ async def get_user_card_quantity(
 
 
 # ============================================================
-# 🔄 Trade Functions
+# 🔄 PART 4: Trade Functions
 # ============================================================
 
 async def create_trade(
     pool: Optional[Pool],
-    from_user_id: int,
-    to_user_id: int,
+    from_user: int,
+    to_user: int,
     offered_card_id: int,
-    requested_card_id: Optional[int] = None,
-    message: Optional[str] = None
+    requested_card_id: Optional[int] = None
 ) -> Optional[int]:
     """
     Create a new trade request.
     
     Args:
         pool: Database pool
-        from_user_id: User offering the trade
-        to_user_id: User receiving the trade request
+        from_user: User offering the trade
+        to_user: User receiving the trade request
         offered_card_id: Card being offered
         requested_card_id: Card being requested (optional)
-        message: Optional message with trade
         
     Returns:
         Trade ID if created, None on error
     """
     if not db.is_connected:
         return None
-    
+
     # Validate: can't trade with yourself
-    if from_user_id == to_user_id:
+    if from_user == to_user:
         return None
-    
+
     try:
         query = """
-            INSERT INTO trades (from_user_id, to_user_id, offered_card_id, requested_card_id, message, status)
-            VALUES ($1, $2, $3, $4, $5, 'pending')
-            RETURNING trade_id
+            INSERT INTO trades (from_user, to_user, offered_card_id, requested_card_id, status)
+            VALUES ($1, $2, $3, $4, 'pending')
+            RETURNING id
         """
-        result = await db.fetchval(query, from_user_id, to_user_id, offered_card_id, requested_card_id, message)
+        result = await db.fetchval(query, from_user, to_user, offered_card_id, requested_card_id)
         return result
     except Exception as e:
         error_logger.error(f"Error creating trade: {e}", exc_info=True)
@@ -1760,7 +1770,7 @@ async def get_trade(
     """
     if not db.is_connected:
         return None
-    
+
     try:
         query = """
             SELECT 
@@ -1778,11 +1788,11 @@ async def get_trade(
                 rc.rarity as requested_rarity,
                 rc.photo_file_id as requested_photo
             FROM trades t
-            JOIN users fu ON t.from_user_id = fu.user_id
-            JOIN users tu ON t.to_user_id = tu.user_id
+            JOIN users fu ON t.from_user = fu.user_id
+            JOIN users tu ON t.to_user = tu.user_id
             JOIN cards oc ON t.offered_card_id = oc.card_id
             LEFT JOIN cards rc ON t.requested_card_id = rc.card_id
-            WHERE t.trade_id = $1
+            WHERE t.id = $1
         """
         return await db.fetchrow(query, trade_id)
     except Exception as e:
@@ -1810,7 +1820,7 @@ async def list_pending_trades_for_user(
     """
     if not db.is_connected:
         return []
-    
+
     try:
         if as_recipient:
             query = """
@@ -1825,10 +1835,10 @@ async def list_pending_trades_for_user(
                     rc.anime as requested_anime,
                     rc.rarity as requested_rarity
                 FROM trades t
-                JOIN users fu ON t.from_user_id = fu.user_id
+                JOIN users fu ON t.from_user = fu.user_id
                 JOIN cards oc ON t.offered_card_id = oc.card_id
                 LEFT JOIN cards rc ON t.requested_card_id = rc.card_id
-                WHERE t.to_user_id = $1 AND t.status = 'pending'
+                WHERE t.to_user = $1 AND t.status = 'pending'
                 ORDER BY t.created_at DESC
                 LIMIT $2
             """
@@ -1845,10 +1855,10 @@ async def list_pending_trades_for_user(
                     rc.anime as requested_anime,
                     rc.rarity as requested_rarity
                 FROM trades t
-                JOIN users tu ON t.to_user_id = tu.user_id
+                JOIN users tu ON t.to_user = tu.user_id
                 JOIN cards oc ON t.offered_card_id = oc.card_id
                 LEFT JOIN cards rc ON t.requested_card_id = rc.card_id
-                WHERE t.from_user_id = $1 AND t.status = 'pending'
+                WHERE t.from_user = $1 AND t.status = 'pending'
                 ORDER BY t.created_at DESC
                 LIMIT $2
             """
@@ -1874,11 +1884,11 @@ async def count_pending_trades(
     """
     if not db.is_connected:
         return 0
-    
+
     try:
         query = """
             SELECT COUNT(*) FROM trades
-            WHERE (from_user_id = $1 OR to_user_id = $1) AND status = 'pending'
+            WHERE (from_user = $1 OR to_user = $1) AND status = 'pending'
         """
         result = await db.fetchval(query, user_id)
         return result or 0
@@ -1890,8 +1900,7 @@ async def count_pending_trades(
 async def update_trade_status(
     pool: Optional[Pool],
     trade_id: int,
-    status: str,
-    by_user_id: Optional[int] = None
+    status: str
 ) -> bool:
     """
     Update a trade's status.
@@ -1900,34 +1909,24 @@ async def update_trade_status(
         pool: Database pool
         trade_id: Trade ID
         status: New status (pending, accepted, rejected, cancelled, completed, failed)
-        by_user_id: User making the update (for validation)
         
     Returns:
         True if updated successfully
     """
     if not db.is_connected:
         return False
-    
+
     valid_statuses = {'pending', 'accepted', 'rejected', 'cancelled', 'completed', 'failed'}
     if status not in valid_statuses:
         return False
-    
+
     try:
-        if status == 'completed':
-            query = """
-                UPDATE trades 
-                SET status = $2, completed_at = NOW()
-                WHERE trade_id = $1
-                RETURNING trade_id
-            """
-        else:
-            query = """
-                UPDATE trades 
-                SET status = $2
-                WHERE trade_id = $1
-                RETURNING trade_id
-            """
-        
+        query = """
+            UPDATE trades 
+            SET status = $2
+            WHERE id = $1
+            RETURNING id
+        """
         result = await db.fetchval(query, trade_id, status)
         return result is not None
     except Exception as e:
@@ -1937,64 +1936,65 @@ async def update_trade_status(
 
 async def transfer_card_between_users(
     pool: Optional[Pool],
-    from_user_id: int,
-    to_user_id: int,
+    from_user: int,
+    to_user: int,
     card_id: int,
     quantity: int = 1
 ) -> tuple[bool, str]:
     """
     Atomically transfer a card from one user to another.
-    Uses transaction with row-level locking to prevent race conditions.
+    Uses transaction with row-level locking.
     
     Args:
         pool: Database pool
-        from_user_id: User giving the card
-        to_user_id: User receiving the card
+        from_user: User giving the card
+        to_user: User receiving the card
         card_id: Card to transfer
-        quantity: How many to transfer (default 1)
+        quantity: How many to transfer
         
     Returns:
         Tuple of (success: bool, message: str)
     """
     if not db.is_connected:
         return False, "Database not connected"
-    
-    if from_user_id == to_user_id:
+
+    if from_user == to_user:
         return False, "Cannot transfer to yourself"
-    
+
     if quantity < 1:
         return False, "Invalid quantity"
-    
+
     try:
         async with db.pool.acquire() as conn:
             async with conn.transaction():
-                # Lock and check sender's card with FOR UPDATE
-                sender_query = """
+                # Lock and check sender's card
+                sender_qty = await conn.fetchval(
+                    """
                     SELECT quantity FROM collections
                     WHERE user_id = $1 AND card_id = $2
                     FOR UPDATE
-                """
-                sender_qty = await conn.fetchval(sender_query, from_user_id, card_id)
-                
+                    """,
+                    from_user, card_id
+                )
+
                 if sender_qty is None or sender_qty < quantity:
                     return False, f"Insufficient cards (have: {sender_qty or 0}, need: {quantity})"
-                
+
                 # Decrease sender's quantity
                 new_sender_qty = sender_qty - quantity
-                
+
                 if new_sender_qty <= 0:
-                    # Remove the row entirely if quantity becomes 0
                     await conn.execute(
                         "DELETE FROM collections WHERE user_id = $1 AND card_id = $2",
-                        from_user_id, card_id
+                        from_user, card_id
                     )
                 else:
                     await conn.execute(
                         "UPDATE collections SET quantity = $3 WHERE user_id = $1 AND card_id = $2",
-                        from_user_id, card_id, new_sender_qty
+                        from_user, card_id, new_sender_qty
                     )
-                
-                # Add to receiver (upsert)
+
+                # Add to receiver
                 await conn.execute(
                     """
                     INSERT INTO collections (user_id, card_id, quantity, caught_at)
@@ -2002,11 +2002,11 @@ async def transfer_card_between_users(
                     ON CONFLICT (user_id, card_id) DO UPDATE
                     SET quantity = collections.quantity + $3
                     """,
-                    to_user_id, card_id, quantity
+                    to_user, card_id, quantity
                 )
-                
+
                 return True, "Transfer successful"
-                
+
     except Exception as e:
         error_logger.error(f"Error transferring card: {e}", exc_info=True)
         return False, f"Transfer failed: {str(e)}"
@@ -2024,46 +2024,79 @@ async def execute_trade(
     Args:
         pool: Database pool
         trade_id: Trade to execute
-        accepting_user_id: User accepting the trade (must be to_user_id)
+        accepting_user_id: User accepting the trade (must be to_user)
         
     Returns:
         Tuple of (success: bool, message: str)
     """
     if not db.is_connected:
         return False, "Database not connected"
-    
+
     try:
         # Get trade details
         trade = await get_trade(None, trade_id)
-        
+
         if not trade:
             return False, "Trade not found"
-        
+
         if trade["status"] != "pending":
             return False, f"Trade is no longer pending (status: {trade['status']})"
-        
-        if trade["to_user_id"] != accepting_user_id:
+
+        if trade["to_user"] != accepting_user_id:
             return False, "Only the recipient can accept this trade"
-        
-        from_user_id = trade["from_user_id"]
-        to_user_id = trade["to_user_id"]
+
+        from_user = trade["from_user"]
+        to_user = trade["to_user"]
         offered_card_id = trade["offered_card_id"]
         requested_card_id = trade.get("requested_card_id")
-        
+
         async with db.pool.acquire() as conn:
             async with conn.transaction():
                 # Verify from_user still has the offered card
                 from_qty = await conn.fetchval(
                     "SELECT quantity FROM collections WHERE user_id = $1 AND card_id = $2 FOR UPDATE",
-                    from_user_id, offered_card_id
+                    from_user, offered_card_id
                 )
-                
+
                 if not from_qty or from_qty < 1:
                     await update_trade_status(None, trade_id, "failed")
                     return False, "Offerer no longer has the offered card"
-                
-                # If this is a swap (requested_card_id exists), verify to_user has that card
+
+                # If this is a swap, verify to_user has the requested card
                 if requested_card_id:
                     to_qty = await conn.fetchval(
                         "SELECT quantity FROM collections WHERE user_id = $1 AND card_id = $2 FOR UPDATE",
-                        to_user_id, requested_
+                        to_user, requested_card_id
+                    )
+
+                    if not to_qty or to_qty < 1:
+                        await update_trade_status(None, trade_id, "failed")
+                        return False, "Recipient no longer has the requested card"
+
+                # Perform the transfers within the same transaction
+                # Transfer 1: from_user -> to_user (offered card)
+                success1, msg1 = await transfer_card_between_users(
+                    None, from_user, to_user, offered_card_id, 1
+                )
+
+                if not success1:
+                    raise Exception(f"Failed to transfer offered card: {msg1}")
+
+                # Transfer 2: to_user -> from_user (requested card, if exists)
+                if requested_card_id:
+                    success2, msg2 = await transfer_card_between_users(
+                        None, to_user, from_user, requested_card_id, 1
+                    )
+
+                    if not success2:
+                        raise Exception(f"Failed to transfer requested card: {msg2}")
+
+                # Mark trade as completed
+                await update_trade_status(None, trade_id, "completed")
+
+                return True, "Trade completed successfully!"
+
+    except Exception as e:
+        error_logger.error(f"Error executing trade: {e}", exc_info=True)
+        await update_trade_status(None, trade_id, "failed")
+        return False, f"Trade execution failed: {str(e)}"
