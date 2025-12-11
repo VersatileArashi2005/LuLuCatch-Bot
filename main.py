@@ -53,7 +53,7 @@ from handlers.admin import (
 )
 from handlers.catch import (
     catch_command_handler,
-    catch_callback_handler,
+    battle_callback,  # CHANGED: was catch_callback_handler
     force_spawn_handler,
     name_guess_message_handler,
 )
@@ -86,44 +86,44 @@ async def setup_bot() -> Application:
         Configured Application instance
     """
     log_startup("Setting up Telegram bot application...")
-    
+
     # Build the application with token
     application = (
         ApplicationBuilder()
         .token(Config.BOT_TOKEN)
         .build()
     )
-    
+
     # Set bot start time for uptime tracking
     set_bot_start_time()
-    
+
     # ========================================
     # Define Basic Command Handlers
     # ========================================
-    
+
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handler for /start command."""
         if not update.message or not update.effective_user:
             return
-        
+
         user = update.effective_user
         db_status = "✅ Connected" if db.is_connected else "⚠️ Offline"
-        
+
         # Check for start parameters
         if context.args:
             param = context.args[0]
-            
+
             # Handle card view from inline
             if param.startswith("card_"):
                 try:
                     card_id = int(param.replace("card_", ""))
                     from db import get_card_by_id
                     card = await get_card_by_id(None, card_id)
-                    
+
                     if card:
                         from utils.rarity import rarity_to_text
                         rarity_name, rarity_prob, rarity_emoji = rarity_to_text(card["rarity"])
-                        
+
                         caption = (
                             f"{rarity_emoji} *{card['character_name']}*\n\n"
                             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -133,7 +133,7 @@ async def setup_bot() -> Application:
                             f"📊 *Drop Rate:* {rarity_prob}%\n"
                             f"━━━━━━━━━━━━━━━━━━━━"
                         )
-                        
+
                         if card.get("photo_file_id"):
                             await update.message.reply_photo(
                                 photo=card["photo_file_id"],
@@ -145,7 +145,7 @@ async def setup_bot() -> Application:
                         return
                 except Exception as e:
                     error_logger.error(f"Error handling card start param: {e}")
-            
+
             # Handle inline help
             elif param == "inline_help" or param == "search":
                 await update.message.reply_text(
@@ -159,12 +159,12 @@ async def setup_bot() -> Application:
                     parse_mode="Markdown"
                 )
                 return
-            
+
             # Handle harem from inline
             elif param == "harem":
                 # Redirect to collection command
                 pass  # Fall through to normal start
-        
+
         await update.message.reply_text(
             f"🎴 *Welcome to LuLuCatch, {user.first_name}!*\n\n"
             f"I'm a card collection bot. Catch cards when they spawn in groups!\n\n"
@@ -183,12 +183,12 @@ async def setup_bot() -> Application:
             parse_mode="Markdown"
         )
         app_logger.info(f"📨 /start from user {user.id}")
-    
+
     async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handler for /info command."""
         if not update.message:
             return
-        
+
         if db.is_connected:
             stats = await get_global_stats(None)
             await update.message.reply_text(
@@ -209,12 +209,12 @@ async def setup_bot() -> Application:
                 f"Some features may be unavailable.",
                 parse_mode="Markdown"
             )
-    
+
     async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handler for /help command."""
         if not update.message:
             return
-        
+
         await update.message.reply_text(
             "📚 *LuLuCatch Bot Help*\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
@@ -239,14 +239,14 @@ async def setup_bot() -> Application:
             "━━━━━━━━━━━━━━━━━━━━",
             parse_mode="Markdown"
         )
-    
+
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Global error handler for the bot."""
         error_logger.error(
             f"Exception while handling an update: {context.error}",
             exc_info=context.error
         )
-        
+
         if isinstance(update, Update) and update.effective_message:
             try:
                 await update.effective_message.reply_text(
@@ -254,103 +254,100 @@ async def setup_bot() -> Application:
                 )
             except Exception:
                 pass
-    
+
     # ========================================
     # Register Conversation Handlers (MUST BE FIRST)
     # ========================================
-    
+
     application.add_handler(upload_conversation_handler)
     application.add_handler(broadcast_conversation_handler)
-    
+
     # ========================================
     # Register Command Handlers
     # ========================================
-    
+
     # Basic commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("info", info_command))
     application.add_handler(CommandHandler("help", help_command))
-    
+
     # Catch commands
     application.add_handler(catch_command_handler)
     application.add_handler(force_spawn_handler)
-    
+
     # Admin commands
     application.add_handler(admin_command_handler)
     application.add_handler(stats_command_handler)
     application.add_handler(ban_command_handler)
     application.add_handler(unban_command_handler)
     application.add_handler(quick_upload_handler)
-    
+
     # ========================================
     # Register Callback Query Handlers
     # ========================================
-    
+
     # Upload rarity selection
     application.add_handler(upload_rarity_callback_handler)
-    
+
     # Admin panel callbacks
     application.add_handler(CallbackQueryHandler(
         admin_callback_handler,
         pattern=r"^admin_"
     ))
-    
-    # Catch callbacks
-    application.add_handler(CallbackQueryHandler(
-        catch_callback_handler,
-        pattern=r"^(catch_|skip_|expired)"
-    ))
-    
+
+    # Battle callbacks (CHANGED: updated pattern for battle system)
+    application.add_handler(battle_callback)
+
     # ========================================
     # Register Message Handlers
     # ========================================
-    
+
     application.add_handler(name_guess_message_handler)
-    
+
     # ========================================
     # Register Inline Search Handlers
     # ========================================
-    
+
     register_inline_handlers(application)
     register_inline_callback_handlers(application)
-    
+
     # ========================================
     # Register Part 4 Handlers
     # ========================================
-    
+
     register_collection_handlers(application)
     register_cardinfo_handlers(application)
     register_trade_handlers(application)
     register_leaderboard_handlers(application)
-    
+
     # ========================================
     # Error Handler
     # ========================================
-    
+
     application.add_error_handler(error_handler)
-    
+
     # ========================================
     # Set Bot Commands Menu
     # ========================================
-    
+
     commands = [
         BotCommand("start", "🚀 Start the bot"),
         BotCommand("info", "📊 Bot information"),
         BotCommand("help", "📚 Help & commands"),
-        BotCommand("catch", "🎯 Catch a card"),
+        BotCommand("catch", "⚔️ Battle for a card"),
         BotCommand("collection", "🎴 Your collection"),
         BotCommand("cardinfo", "🔍 Card details"),
         BotCommand("trades", "🔁 Pending trades"),
         BotCommand("leaderboard", "🏆 Top collectors"),
     ]
-    
+
     try:
         await application.bot.set_my_commands(commands)
     except Exception as e:
         error_logger.error(f"Failed to set commands: {e}")
-    
-    log_startup("✅ Bot application configured")
-    
+
+    log_startup("✅ Bot application configured with battle system")
+
     return application
 
 
@@ -365,25 +362,25 @@ async def lifespan(app: FastAPI):
     Handles startup and shutdown events.
     """
     global bot_app
-    
+
     # ========================================
     # 🚀 Startup
     # ========================================
     log_startup("Starting LuLuCatch Bot...")
-    
+
     # Validate configuration
     is_valid, errors = Config.validate()
     if not is_valid:
         for error in errors:
             error_logger.error(error)
         raise RuntimeError("Invalid configuration. Check the errors above.")
-    
+
     # Display configuration
     app_logger.info(Config.display_config())
-    
+
     # Try to connect to database
     db_connected = await db.connect(max_retries=3, retry_delay=2)
-    
+
     if db_connected:
         await init_db()
     else:
@@ -391,23 +388,23 @@ async def lifespan(app: FastAPI):
             "⚠️ Bot starting without database connection. "
             "Some features will be unavailable."
         )
-    
+
     # Set up Telegram bot
     bot_app = await setup_bot()
-    
+
     # Initialize and start the bot
     await bot_app.initialize()
     await bot_app.start()
-    
+
     # Set up webhook if URL is configured
     if Config.WEBHOOK_URL:
         webhook_url = Config.get_full_webhook_url()
         log_webhook(f"Setting webhook: {webhook_url}")
-        
+
         try:
             # Delete any existing webhook first
             await bot_app.bot.delete_webhook(drop_pending_updates=False)
-            
+
             # Set new webhook
             webhook_set = await bot_app.bot.set_webhook(
                 url=webhook_url,
@@ -415,42 +412,42 @@ async def lifespan(app: FastAPI):
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=False,
             )
-            
+
             if webhook_set:
                 log_webhook("✅ Webhook configured successfully")
-                
+
                 # Verify webhook was set
                 webhook_info = await bot_app.bot.get_webhook_info()
                 log_webhook(f"Webhook URL: {webhook_info.url}")
                 log_webhook(f"Pending updates: {webhook_info.pending_update_count}")
             else:
                 error_logger.error("❌ Failed to set webhook")
-                
+
         except Exception as e:
             error_logger.error(f"❌ Webhook error: {e}", exc_info=True)
     else:
         # Use polling mode (for local development)
         log_startup("⚠️ No webhook URL configured, using polling mode")
         asyncio.create_task(bot_app.updater.start_polling(drop_pending_updates=True))
-    
+
     log_startup("🎴 LuLuCatch Bot is running!")
-    
+
     yield  # Application is running
-    
+
     # ========================================
     # 🛑 Shutdown
     # ========================================
     log_shutdown("Shutting down LuLuCatch Bot...")
-    
+
     if bot_app:
         try:
             await bot_app.stop()
             await bot_app.shutdown()
         except Exception as e:
             error_logger.error(f"Shutdown error: {e}")
-    
+
     await db.disconnect()
-    
+
     log_shutdown("✅ LuLuCatch Bot shutdown complete")
 
 
@@ -483,9 +480,9 @@ async def root():
 async def health_check():
     """Detailed health check endpoint."""
     from db import health_check as db_health_check
-    
+
     db_status = await db_health_check(None) if db.is_connected else False
-    
+
     return {
         "status": "healthy" if db_status else "degraded",
         "database": "connected" if db_status else "disconnected",
@@ -499,40 +496,40 @@ async def webhook_handler(request: Request) -> Response:
     Webhook endpoint for receiving Telegram updates.
     """
     global bot_app
-    
+
     # Verify the webhook secret token
     secret_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-    
+
     if secret_token != Config.WEBHOOK_SECRET:
         error_logger.warning("Invalid webhook secret token received")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid secret token"
         )
-    
+
     if bot_app is None:
         error_logger.error("Bot application not initialized")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Bot not ready"
         )
-    
+
     try:
         # Parse the update from request body
         update_data = await request.json()
-        
+
         # Log incoming update
         update_id = update_data.get("update_id", "unknown")
         app_logger.info(f"📥 Received update: {update_id}")
-        
+
         # Convert to Update object
         update = Update.de_json(update_data, bot_app.bot)
-        
+
         # Process the update
         await bot_app.process_update(update)
-        
+
         return Response(status_code=status.HTTP_200_OK, content="OK")
-        
+
     except Exception as e:
         error_logger.error(f"Error processing webhook update: {e}", exc_info=True)
         # Return 200 to prevent Telegram from retrying
@@ -552,7 +549,7 @@ async def webhook_get():
 if __name__ == "__main__":
     # Set up logging
     setup_logging(debug=Config.DEBUG)
-    
+
     # Run FastAPI server
     uvicorn.run(
         "main:app",
