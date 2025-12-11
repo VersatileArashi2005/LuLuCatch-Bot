@@ -1,1545 +1,1374 @@
 # ============================================================
-# 📁 File: db.py
-# 📍 Location: telegram_card_bot/db.py
-# 📝 Description: AsyncPG database operations with Railway support
+# 📁 File: handlers/upload.py
+# 📍 Location: telegram_card_bot/handlers/upload.py
+# 📝 Description: Enhanced card upload with photo-only duplicate detection
 # ============================================================
 
-import asyncio
-import ssl
 from datetime import datetime
-from typing import Optional, Any, List
-from contextlib import asynccontextmanager
-from urllib.parse import urlparse, parse_qs
+from typing import Optional, Dict, Any, List
+import hashlib
 
-import asyncpg
-from asyncpg import Pool, Connection, Record
-from asyncpg.exceptions import (
-    DuplicateTableError,
-    DuplicateObjectError,
-    UndefinedTableError,
-    PostgresError,
+from telegram import (
+    Update,
+    PhotoSize,
+    Document,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
 )
+from telegram.ext import (
+    ContextTypes,
+    ConversationHandler,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+)
+from telegram.constants import ChatType
 
 from config import Config
-from utils.logger import app_logger, error_logger, log_database
+from db import db, ensure_user, get_card_count
+from utils.logger import app_logger, error_logger, log_command
+from utils.rarity import (
+    get_random_rarity,
+    rarity_to_text,
+    RARITY_TABLE,
+)
 
 
 # ============================================================
-# 🗄️ Database Pool Management
+# 📊 Conversation States
 # ============================================================
 
-class Database:
-    """
-    Async database manager using asyncpg connection pool.
-    
-    Features:
-    - Singleton pattern for single database instance
-    - Railway-compatible SSL handling
-    - Connection retry logic
-    - Safe connection checking
-    """
-    
-    _pool: Optional[Pool] = None
-    _instance: Optional["Database"] = None
-    
-    def __new__(cls) -> "Database":
-        """Singleton pattern to ensure single database instance."""
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-    
-    @property
-    def pool(self) -> Pool:
-        """Get the connection pool, raising error if not initialized."""
-        if self._pool is None:
-            raise RuntimeError("Database pool not initialized. Call connect() first.")
-        return self._pool
-    
-    @property
-    def is_connected(self) -> bool:
-        """Check if database is connected."""
-        return self._pool is not None
-    
-    def _parse_database_url(self) -> dict:
-        """
-        Parse DATABASE_URL and extract connection parameters.
-        Handles Railway's postgres:// vs postgresql:// difference.
-        """
-        url = Config.DATABASE_URL
-        
-        # Railway uses postgres:// but asyncpg needs postgresql://
-        if url.startswith("postgres://"):
-            url = url.replace("postgres://", "postgresql://", 1)
-        
-        parsed = urlparse(url)
-        query_params = parse_qs(parsed.query)
-        
-        return {
-            "host": parsed.hostname,
-            "port": parsed.port or 5432,
-            "user": parsed.username,
-            "password": parsed.password,
-            "database": parsed.path.lstrip("/"),
-            "ssl": "sslmode" in query_params or "require" in str(query_params.get("sslmode", [])),
-        }
-    
-    async def connect(self, max_retries: int = 3, retry_delay: int = 2) -> bool:
-        """
-        Initialize the database connection pool with retry logic.
-        
-        Args:
-            max_retries: Maximum connection attempts
-            retry_delay: Seconds between retries
-            
-        Returns:
-            True if connected successfully, False otherwise
-        """
-        if self._pool is not None:
-            log_database("Connection pool already exists")
-            return True
-        
-        # Check if DATABASE_URL is configured
-        if not Config.DATABASE_URL or Config.DATABASE_URL == "postgresql://user:password@localhost:5432/cardbot":
-            error_logger.warning(
-                "⚠️ DATABASE_URL not configured! "
-                "Please add a PostgreSQL database on Railway."
-            )
-            return False
-        
-        # Parse connection parameters
-        db_params = self._parse_database_url()
-        
-        log_database(f"Connecting to database at {db_params['host']}:{db_params['port']}...")
-        
-        # SSL context for Railway (required for external connections)
-        ssl_context = None
-        if db_params.get("ssl") or "railway" in str(db_params.get("host", "")):
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            log_database("Using SSL connection")
-        
-        # Prepare DSN
-        dsn = Config.DATABASE_URL
-        if dsn.startswith("postgres://"):
-            dsn = dsn.replace("postgres://", "postgresql://", 1)
-        
-        # Retry loop for connection
-        for attempt in range(1, max_retries + 1):
-            try:
-                log_database(f"Connection attempt {attempt}/{max_retries}...")
-                
-                self._pool = await asyncpg.create_pool(
-                    dsn=dsn,
-                    min_size=Config.DB_MIN_CONNECTIONS,
-                    max_size=Config.DB_MAX_CONNECTIONS,
-                    command_timeout=60,
-                    ssl=ssl_context,
-                )
-                
-                # Test the connection
-                async with self._pool.acquire() as conn:
-                    await conn.execute("SELECT 1")
-                
-                log_database(
-                    f"✅ Database connected! "
-                    f"(pool: {Config.DB_MIN_CONNECTIONS}-{Config.DB_MAX_CONNECTIONS})"
-                )
-                return True
-                
-            except asyncpg.InvalidPasswordError as e:
-                error_logger.error(f"❌ Database authentication failed: {e}")
-                return False
-                
-            except asyncpg.InvalidCatalogNameError as e:
-                error_logger.error(f"❌ Database does not exist: {e}")
-                return False
-                
-            except Exception as e:
-                error_logger.error(
-                    f"Connection attempt {attempt} failed: {type(e).__name__}: {e}"
-                )
-                
-                if attempt < max_retries:
-                    log_database(f"Retrying in {retry_delay} seconds...")
-                    await asyncio.sleep(retry_delay)
-                else:
-                    error_logger.error(
-                        f"❌ Failed to connect after {max_retries} attempts. "
-                        f"Check your DATABASE_URL configuration."
-                    )
-                    return False
-        
-        return False
-    
-    async def disconnect(self) -> None:
-        """Close the database connection pool."""
-        if self._pool is not None:
-            log_database("Closing database pool...")
-            await self._pool.close()
-            self._pool = None
-            log_database("✅ Database pool closed")
-    
-    @asynccontextmanager
-    async def acquire(self):
-        """
-        Context manager for acquiring a connection from the pool.
-        
-        Usage:
-            async with db.acquire() as conn:
-                result = await conn.fetch("SELECT * FROM users")
-        """
-        if not self.is_connected:
-            raise RuntimeError("Database not connected")
-        async with self.pool.acquire() as connection:
-            yield connection
-    
-    async def execute(self, query: str, *args) -> str:
-        """Execute a query without returning results."""
-        if not self.is_connected:
-            raise RuntimeError("Database not connected")
-        async with self.acquire() as conn:
-            return await conn.execute(query, *args)
-    
-    async def fetch(self, query: str, *args) -> List[Record]:
-        """Execute a query and return all results."""
-        if not self.is_connected:
-            raise RuntimeError("Database not connected")
-        async with self.acquire() as conn:
-            return await conn.fetch(query, *args)
-    
-    async def fetchrow(self, query: str, *args) -> Optional[Record]:
-        """Execute a query and return a single row."""
-        if not self.is_connected:
-            raise RuntimeError("Database not connected")
-        async with self.acquire() as conn:
-            return await conn.fetchrow(query, *args)
-    
-    async def fetchval(self, query: str, *args) -> Any:
-        """Execute a query and return a single value."""
-        if not self.is_connected:
-            raise RuntimeError("Database not connected")
-        async with self.acquire() as conn:
-            return await conn.fetchval(query, *args)
-
-
-# Global database instance
-db = Database()
+SELECT_ANIME = 0
+ADD_NEW_ANIME = 1
+SELECT_CHARACTER = 2
+ADD_NEW_CHARACTER = 3
+SELECT_RARITY = 4
+UPLOAD_PHOTO = 5
+PREVIEW_CONFIRM = 6
 
 
 # ============================================================
-# 🏗️ Schema Initialization
+# ⏱️ Upload Cooldown Management
 # ============================================================
 
-async def init_db(pool: Optional[Pool] = None) -> bool:
-    """
-    Initialize database schema - create tables if they don't exist.
-    
-    This function is idempotent - it can be run multiple times safely.
-    It handles existing tables, constraints, and indexes gracefully.
-    
-    Args:
-        pool: Optional asyncpg pool (uses global db if not provided)
-        
-    Returns:
-        True if successful, False otherwise
-    """
+_upload_cooldowns: Dict[int, datetime] = {}
+UPLOAD_COOLDOWN_SECONDS = 5
+
+
+def check_upload_cooldown(user_id: int) -> tuple[bool, int]:
+    """Check if user is on upload cooldown."""
+    if user_id not in _upload_cooldowns:
+        return False, 0
+
+    last_upload = _upload_cooldowns[user_id]
+    elapsed = (datetime.now() - last_upload).total_seconds()
+
+    if elapsed < UPLOAD_COOLDOWN_SECONDS:
+        remaining = int(UPLOAD_COOLDOWN_SECONDS - elapsed)
+        return True, remaining
+
+    return False, 0
+
+
+def set_upload_cooldown(user_id: int) -> None:
+    """Set the upload cooldown for a user."""
+    _upload_cooldowns[user_id] = datetime.now()
+
+
+# ============================================================
+# 📝 Session Data Management
+# ============================================================
+
+def init_upload_session(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Initialize upload session data."""
+    context.user_data['upload'] = {
+        'anime': None,
+        'character': None,
+        'rarity': None,
+        'photo_file_id': None,
+        'photo_hash': None,
+        'started_at': datetime.now()
+    }
+
+
+def get_upload_data(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, Any]:
+    """Get current upload session data."""
+    return context.user_data.get('upload', {})
+
+
+def update_upload_data(context: ContextTypes.DEFAULT_TYPE, **kwargs) -> None:
+    """Update upload session data."""
+    if 'upload' not in context.user_data:
+        init_upload_session(context)
+    context.user_data['upload'].update(kwargs)
+
+
+def clear_upload_data(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear upload session data."""
+    context.user_data.pop('upload', None)
+
+
+# ============================================================
+# 🗄️ Database Helper Functions
+# ============================================================
+
+async def get_existing_anime_list() -> List[str]:
+    """Get list of unique anime names from database."""
     if not db.is_connected:
-        log_database("⚠️ Cannot initialize schema - database not connected")
-        return False
-    
-    log_database("Initializing database schema...")
+        return []
     
     try:
-        # ========================================
-        # 0. Remove Old Constraints (AUTO-FIX)
-        # ========================================
+        query = """
+            SELECT DISTINCT anime FROM cards 
+            WHERE is_active = TRUE 
+            ORDER BY anime ASC
+        """
+        rows = await db.fetch(query)
+        return [row['anime'] for row in rows]
+    except Exception as e:
+        error_logger.error(f"Error fetching anime list: {e}")
+        return []
+
+
+async def get_characters_for_anime(anime: str) -> List[str]:
+    """
+    Get list of characters for a specific anime.
+    Returns distinct names for selection (characters can repeat).
+    """
+    if not db.is_connected:
+        return []
+    
+    try:
+        query = """
+            SELECT DISTINCT character_name FROM cards 
+            WHERE anime = $1 AND is_active = TRUE 
+            ORDER BY character_name ASC
+        """
+        rows = await db.fetch(query, anime)
+        return [row['character_name'] for row in rows]
+    except Exception as e:
+        error_logger.error(f"Error fetching characters: {e}")
+        return []
+
+
+async def check_photo_exists(photo_file_id: str) -> tuple[bool, Optional[int]]:
+    """
+    Check if a photo (by file_id) already exists in the database.
+    
+    Args:
+        photo_file_id: Telegram file ID
         
-        log_database("Checking for old constraints to remove...")
+    Returns:
+        Tuple of (exists: bool, existing_card_id: Optional[int])
+    """
+    if not db.is_connected:
+        return False, None
+    
+    try:
+        query = """
+            SELECT card_id, character_name, anime 
+            FROM cards 
+            WHERE photo_file_id = $1 AND is_active = TRUE
+            LIMIT 1
+        """
+        result = await db.fetchrow(query, photo_file_id)
         
-        try:
-            # Drop anime+character unique constraint (we allow duplicates now)
-            await db.execute("""
-                ALTER TABLE cards DROP CONSTRAINT IF EXISTS cards_anime_character_unique
-            """)
-            log_database("✅ Removed old anime+character constraint (if existed)")
-        except Exception as e:
-            log_database(f"Note: Could not drop constraint (might not exist): {e}")
-        
-        try:
-            # Also try alternate names
-            await db.execute("""
-                ALTER TABLE cards DROP CONSTRAINT IF EXISTS cards_anime_character_name_key
-            """)
-        except Exception:
-            pass
-        
-        try:
-            await db.execute("""
-                ALTER TABLE cards DROP CONSTRAINT IF EXISTS cards_anime_character_key
-            """)
-        except Exception:
-            pass
-        
-        # ========================================
-        # 1. Create Users Table
-        # ========================================
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                username VARCHAR(255),
-                first_name VARCHAR(255),
-                last_name VARCHAR(255),
-                coins INTEGER DEFAULT 0,
-                xp INTEGER DEFAULT 0,
-                level INTEGER DEFAULT 1,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                is_banned BOOLEAN DEFAULT FALSE,
-                ban_reason TEXT,
-                total_catches INTEGER DEFAULT 0,
-                daily_streak INTEGER DEFAULT 0,
-                last_daily TIMESTAMP WITH TIME ZONE,
-                favorite_card_id INTEGER,
-                bio TEXT
-            )
-        """)
-        log_database("✅ Users table ready")
-        
-        # ========================================
-        # 2. Create Cards Table
-        # ========================================
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS cards (
-                card_id SERIAL PRIMARY KEY,
-                anime VARCHAR(255) NOT NULL,
-                character_name VARCHAR(255) NOT NULL,
-                rarity INTEGER NOT NULL CHECK (rarity BETWEEN 1 AND 11),
-                photo_file_id TEXT NOT NULL,
-                uploader_id BIGINT,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                is_active BOOLEAN DEFAULT TRUE,
-                total_caught INTEGER DEFAULT 0,
-                description TEXT,
-                tags TEXT[]
-            )
-        """)
-        log_database("✅ Cards table ready")
-        
-        # ========================================
-        # 3. Create Collections Table
-        # ========================================
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS collections (
-                collection_id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                card_id INTEGER NOT NULL,
-                caught_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                caught_in_group BIGINT,
-                is_favorite BOOLEAN DEFAULT FALSE,
-                trade_locked BOOLEAN DEFAULT FALSE,
-                quantity INTEGER DEFAULT 1
-            )
-        """)
-        log_database("✅ Collections table ready")
-        
-        # ========================================
-        # 4. Create Groups Table
-        # ========================================
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS groups (
-                group_id BIGINT PRIMARY KEY,
-                group_name VARCHAR(255),
-                is_active BOOLEAN DEFAULT TRUE,
-                spawn_enabled BOOLEAN DEFAULT TRUE,
-                cooldown_seconds INTEGER DEFAULT 60,
-                last_spawn TIMESTAMP WITH TIME ZONE,
-                current_card_id INTEGER,
-                current_card_message_id BIGINT,
-                total_spawns INTEGER DEFAULT 0,
-                total_catches INTEGER DEFAULT 0,
-                joined_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                settings JSONB DEFAULT '{}'::jsonb
-            )
-        """)
-        log_database("✅ Groups table ready")
-        
-        # ========================================
-        # 5. Create Trades Table (Part 4)
-        # ========================================
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS trades (
-                id SERIAL PRIMARY KEY,
-                from_user BIGINT NOT NULL,
-                to_user BIGINT NOT NULL,
-                offered_card_id INTEGER NOT NULL,
-                requested_card_id INTEGER,
-                status TEXT NOT NULL DEFAULT 'pending',
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                CONSTRAINT valid_status CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed', 'failed')),
-                CONSTRAINT no_self_trade CHECK (from_user != to_user)
-            )
-        """)
-        log_database("✅ Trades table ready")
-        
-        # ========================================
-        # 6. Create Stats Table (Part 4)
-        # ========================================
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS stats (
-                id SERIAL PRIMARY KEY,
-                key TEXT UNIQUE NOT NULL,
-                value BIGINT DEFAULT 0,
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            )
-        """)
-        log_database("✅ Stats table ready")
-        
-        # ========================================
-        # 7. Add Constraints (safely ignore if exist)
-        # ========================================
-        
-        # NOTE: We do NOT add a unique constraint on (anime, character_name)
-        # because we allow the same character to exist multiple times
-        # (different poses, rarities, artworks)
-        
-        # Unique constraint: collections (user_id + card_id)
-        try:
-            await db.execute("""
-                ALTER TABLE collections 
-                ADD CONSTRAINT collections_user_card_unique 
-                UNIQUE (user_id, card_id)
-            """)
-        except (DuplicateTableError, DuplicateObjectError, PostgresError):
-            pass
-        
-        # Foreign keys for collections
-        try:
-            await db.execute("""
-                ALTER TABLE collections 
-                ADD CONSTRAINT fk_collections_user 
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-            """)
-        except (DuplicateTableError, DuplicateObjectError, PostgresError):
-            pass
-        
-        try:
-            await db.execute("""
-                ALTER TABLE collections 
-                ADD CONSTRAINT fk_collections_card 
-                FOREIGN KEY (card_id) REFERENCES cards(card_id) ON DELETE CASCADE
-            """)
-        except (DuplicateTableError, DuplicateObjectError, PostgresError):
-            pass
-        
-        # Foreign keys for trades
-        try:
-            await db.execute("""
-                ALTER TABLE trades 
-                ADD CONSTRAINT fk_trades_from_user 
-                FOREIGN KEY (from_user) REFERENCES users(user_id) ON DELETE CASCADE
-            """)
-        except (DuplicateTableError, DuplicateObjectError, PostgresError):
-            pass
-        
-        try:
-            await db.execute("""
-                ALTER TABLE trades 
-                ADD CONSTRAINT fk_trades_to_user 
-                FOREIGN KEY (to_user) REFERENCES users(user_id) ON DELETE CASCADE
-            """)
-        except (DuplicateTableError, DuplicateObjectError, PostgresError):
-            pass
-        
-        try:
-            await db.execute("""
-                ALTER TABLE trades 
-                ADD CONSTRAINT fk_trades_offered_card 
-                FOREIGN KEY (offered_card_id) REFERENCES cards(card_id) ON DELETE CASCADE
-            """)
-        except (DuplicateTableError, DuplicateObjectError, PostgresError):
-            pass
-        
-        try:
-            await db.execute("""
-                ALTER TABLE trades 
-                ADD CONSTRAINT fk_trades_requested_card 
-                FOREIGN KEY (requested_card_id) REFERENCES cards(card_id) ON DELETE SET NULL
-            """)
-        except (DuplicateTableError, DuplicateObjectError, PostgresError):
-            pass
-        
-        # Optional: Add unique constraint on photo_file_id (recommended)
-        try:
-            await db.execute("""
-                ALTER TABLE cards 
-                ADD CONSTRAINT cards_photo_file_id_unique 
-                UNIQUE (photo_file_id)
-            """)
-            log_database("✅ Photo uniqueness constraint added")
-        except (DuplicateTableError, DuplicateObjectError, PostgresError):
-            # Already exists
-            pass
-        
-        log_database("✅ Constraints ready")
-        
-        # ========================================
-        # 8. Create Indexes
-        # ========================================
-        
-        # Collection indexes
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_collections_user_id 
-            ON collections(user_id)
-        """)
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_collections_card_id 
-            ON collections(card_id)
-        """)
-        
-        # Card indexes
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_cards_rarity 
-            ON cards(rarity)
-        """)
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_cards_anime 
-            ON cards(anime)
-        """)
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_cards_active 
-            ON cards(is_active) WHERE is_active = TRUE
-        """)
-        
-        # Group indexes
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_groups_active 
-            ON groups(is_active) WHERE is_active = TRUE
-        """)
-        
-        # User indexes
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_users_banned 
-            ON users(is_banned) WHERE is_banned = FALSE
-        """)
-        
-        # Trade indexes
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_trades_to_user 
-            ON trades(to_user)
-        """)
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_trades_from_user 
-            ON trades(from_user)
-        """)
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_trades_status 
-            ON trades(status)
-        """)
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_trades_pending 
-            ON trades(to_user, status) WHERE status = 'pending'
-        """)
-        
-        log_database("✅ Indexes ready")
-        
-        # ========================================
-        # 9. Insert Default Stats
-        # ========================================
-        await db.execute("""
-            INSERT INTO stats (key, value) VALUES
-                ('total_trades', 0),
-                ('total_catches_today', 0),
-                ('total_spawns_today', 0)
-            ON CONFLICT (key) DO NOTHING
-        """)
-        log_database("✅ Default stats inserted")
-        
-        log_database("✅ Database schema initialized successfully")
-        return True
+        if result:
+            return True, result['card_id']
+        return False, None
         
     except Exception as e:
-        error_logger.error(f"Failed to initialize schema: {e}", exc_info=True)
-        return False
+        error_logger.error(f"Error checking photo existence: {e}")
+        return False, None
+
+
+def generate_photo_hash(file_id: str) -> str:
+    """Generate SHA256 hash from file_id for duplicate detection."""
+    return hashlib.sha256(file_id.encode()).hexdigest()
 
 
 # ============================================================
-# 👤 User Operations
+# 🆕 Direct Card Insert (bypasses add_card constraints)
 # ============================================================
 
-async def ensure_user(
-    pool: Optional[Pool],
-    user_id: int,
-    username: Optional[str] = None,
-    first_name: Optional[str] = None,
-    last_name: Optional[str] = None
-) -> Optional[Record]:
-    """Ensure a user exists in the database, creating if necessary."""
-    if not db.is_connected:
-        return None
-    
-    query = """
-        INSERT INTO users (user_id, username, first_name, last_name)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (user_id) DO UPDATE SET
-            username = COALESCE($2, users.username),
-            first_name = COALESCE($3, users.first_name),
-            last_name = COALESCE($4, users.last_name),
-            updated_at = NOW()
-        RETURNING *
-    """
-    return await db.fetchrow(query, user_id, username, first_name, last_name)
-
-
-async def get_user_by_id(pool: Optional[Pool], user_id: int) -> Optional[Record]:
-    """Get a user by their Telegram user ID."""
-    if not db.is_connected:
-        return None
-    
-    query = "SELECT * FROM users WHERE user_id = $1"
-    return await db.fetchrow(query, user_id)
-
-
-async def update_user_stats(
-    pool: Optional[Pool],
-    user_id: int,
-    coins_delta: int = 0,
-    xp_delta: int = 0,
-    catches_delta: int = 0
-) -> Optional[Record]:
-    """Update user statistics."""
-    if not db.is_connected:
-        return None
-    
-    query = """
-        UPDATE users SET
-            coins = coins + $2,
-            xp = xp + $3,
-            total_catches = total_catches + $4,
-            updated_at = NOW()
-        WHERE user_id = $1
-        RETURNING *
-    """
-    return await db.fetchrow(query, user_id, coins_delta, xp_delta, catches_delta)
-
-
-async def get_user_leaderboard(
-    pool: Optional[Pool],
-    limit: int = 10,
-    order_by: str = "total_catches"
-) -> List[Record]:
-    """Get the top users by various metrics."""
-    if not db.is_connected:
-        return []
-    
-    valid_columns = {"total_catches", "coins", "xp", "level"}
-    if order_by not in valid_columns:
-        order_by = "total_catches"
-    
-    query = f"""
-        SELECT user_id, username, first_name, {order_by}, level
-        FROM users
-        WHERE is_banned = FALSE
-        ORDER BY {order_by} DESC
-        LIMIT $1
-    """
-    return await db.fetch(query, limit)
-
-
-async def get_all_users(pool: Optional[Pool]) -> List[Record]:
-    """Get all non-banned users."""
-    if not db.is_connected:
-        return []
-    
-    query = "SELECT * FROM users WHERE is_banned = FALSE"
-    return await db.fetch(query)
-
-
-# ============================================================
-# 🎴 Card Operations
-# ============================================================
-
-async def add_card(
-    pool: Optional[Pool],
+async def insert_card_direct(
     anime: str,
     character: str,
     rarity: int,
     photo_file_id: str,
-    uploader_id: int,
-    description: Optional[str] = None,
-    tags: Optional[List[str]] = None
-) -> Optional[Record]:
+    uploader_id: int
+) -> Optional[Dict[str, Any]]:
     """
-    Add a new card to the database.
+    Insert a card directly into the database.
     
-    NOTE: This function may still have the old ON CONFLICT logic.
-    For uploads, use insert_card_direct() from upload.py instead.
+    Bypasses add_card() to avoid (anime, character_name) UNIQUE constraint.
+    Only photo_file_id uniqueness is enforced via application logic.
+    
+    Args:
+        anime: Anime name
+        character: Character name
+        rarity: Rarity ID (1-11)
+        photo_file_id: Telegram photo file ID
+        uploader_id: User ID of uploader
+        
+    Returns:
+        Card record if successful, None otherwise
     """
     if not db.is_connected:
-        return None
-
+        raise Exception("Database not connected")
+    
+    # Validate rarity
     if not 1 <= rarity <= 11:
-        raise ValueError(f"Invalid rarity: {rarity}. Must be between 1 and 11.")
-
-    query = """
-        INSERT INTO cards (anime, character_name, rarity, photo_file_id, uploader_id, description, tags)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING *
-    """
+        raise ValueError(f"Invalid rarity: {rarity}. Must be 1-11.")
+    
     try:
-        return await db.fetchrow(
-            query, anime, character, rarity, photo_file_id, uploader_id, description, tags or []
+        # Insert card directly
+        query = """
+            INSERT INTO cards (
+                anime, 
+                character_name, 
+                rarity, 
+                photo_file_id, 
+                uploader_id, 
+                description, 
+                tags,
+                created_at,
+                is_active,
+                total_caught
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), TRUE, 0)
+            RETURNING *
+        """
+        
+        # Generate tags
+        tags = [anime.lower(), character.lower().split()[0] if character else ""]
+        description = f"Uploaded by user {uploader_id}"
+        
+        # Execute insert
+        result = await db.fetchrow(
+            query,
+            anime,
+            character,
+            rarity,
+            photo_file_id,
+            uploader_id,
+            description,
+            tags
         )
+        
+        if result:
+            app_logger.info(
+                f"✅ Card inserted: ID={result['card_id']}, "
+                f"{character} ({anime}), rarity={rarity}"
+            )
+            return dict(result)
+        
+        return None
+        
     except Exception as e:
-        error_logger.error(f"Failed to add card: {e}")
-        return None
-
-
-async def get_card_by_id(pool: Optional[Pool], card_id: int) -> Optional[Record]:
-    """Get a card by its ID."""
-    if not db.is_connected:
-        return None
-
-    query = "SELECT * FROM cards WHERE card_id = $1 AND is_active = TRUE"
-    return await db.fetchrow(query, card_id)
-
-
-async def get_cards_by_ids(pool: Optional[Pool], card_ids: List[int]) -> List[Record]:
-    """Get multiple cards by their IDs."""
-    if not db.is_connected or not card_ids:
-        return []
-
-    query = """
-        SELECT * FROM cards 
-        WHERE card_id = ANY($1) AND is_active = TRUE
-        ORDER BY rarity DESC, character_name
-    """
-    return await db.fetch(query, card_ids)
-
-
-async def get_random_card(pool: Optional[Pool], rarity: Optional[int] = None) -> Optional[Record]:
-    """Get a random active card, optionally filtered by rarity."""
-    if not db.is_connected:
-        return None
-
-    if rarity:
-        query = """
-            SELECT * FROM cards 
-            WHERE is_active = TRUE AND rarity = $1
-            ORDER BY RANDOM() 
-            LIMIT 1
-        """
-        return await db.fetchrow(query, rarity)
-    else:
-        query = """
-            SELECT * FROM cards 
-            WHERE is_active = TRUE
-            ORDER BY RANDOM() 
-            LIMIT 1
-        """
-        return await db.fetchrow(query)
-
-
-async def search_cards(pool: Optional[Pool], search_term: str, limit: int = 20) -> List[Record]:
-    """Search cards by anime or character name."""
-    if not db.is_connected:
-        return []
-
-    query = """
-        SELECT * FROM cards
-        WHERE is_active = TRUE
-          AND (
-            anime ILIKE $1 
-            OR character_name ILIKE $1
-          )
-        ORDER BY rarity DESC, character_name
-        LIMIT $2
-    """
-    search_pattern = f"%{search_term}%"
-    return await db.fetch(query, search_pattern, limit)
-
-
-async def get_card_count(pool: Optional[Pool]) -> int:
-    """Get total number of active cards."""
-    if not db.is_connected:
-        return 0
-
-    query = "SELECT COUNT(*) FROM cards WHERE is_active = TRUE"
-    result = await db.fetchval(query)
-    return result or 0
-
-
-async def increment_card_caught(pool: Optional[Pool], card_id: int) -> None:
-    """Increment the total_caught counter for a card."""
-    if not db.is_connected:
-        return
-
-    query = "UPDATE cards SET total_caught = total_caught + 1 WHERE card_id = $1"
-    await db.execute(query, card_id)
-
-
-async def delete_card(pool: Optional[Pool], card_id: int) -> bool:
-    """Soft delete a card (set is_active = FALSE)."""
-    if not db.is_connected:
-        return False
-
-    query = "UPDATE cards SET is_active = FALSE WHERE card_id = $1 RETURNING card_id"
-    result = await db.fetchrow(query, card_id)
-    return result is not None
-
-
-# ============================================================
-# 📦 Collection Operations
-# ============================================================
-
-async def add_to_collection(
-    pool: Optional[Pool],
-    user_id: int,
-    card_id: int,
-    group_id: Optional[int] = None
-) -> Optional[Record]:
-    """Add a card to a user's collection or increment quantity."""
-    if not db.is_connected:
-        return None
-
-    query = """
-        INSERT INTO collections (user_id, card_id, caught_in_group)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (user_id, card_id) DO UPDATE SET
-            quantity = collections.quantity + 1,
-            caught_at = NOW()
-        RETURNING *
-    """
-    return await db.fetchrow(query, user_id, card_id, group_id)
-
-
-async def get_user_collection(
-    pool: Optional[Pool],
-    user_id: int,
-    page: int = 1,
-    per_page: int = 10,
-    rarity_filter: Optional[int] = None
-) -> tuple[List[Record], int]:
-    """Get a user's card collection with pagination."""
-    if not db.is_connected:
-        return [], 0
-
-    offset = (page - 1) * per_page
-
-    if rarity_filter:
-        count_query = """
-            SELECT COUNT(*) FROM collections c
-            JOIN cards ca ON c.card_id = ca.card_id
-            WHERE c.user_id = $1 AND ca.rarity = $2 AND ca.is_active = TRUE
-        """
-        main_query = """
-            SELECT c.*, ca.anime, ca.character_name, ca.rarity, 
-                   ca.photo_file_id, ca.description
-            FROM collections c
-            JOIN cards ca ON c.card_id = ca.card_id
-            WHERE c.user_id = $1 AND ca.rarity = $4 AND ca.is_active = TRUE
-            ORDER BY ca.rarity DESC, ca.character_name
-            LIMIT $2 OFFSET $3
-        """
-        total = await db.fetchval(count_query, user_id, rarity_filter)
-        cards = await db.fetch(main_query, user_id, per_page, offset, rarity_filter)
-    else:
-        count_query = """
-            SELECT COUNT(*) FROM collections c
-            JOIN cards ca ON c.card_id = ca.card_id
-            WHERE c.user_id = $1 AND ca.is_active = TRUE
-        """
-        main_query = """
-            SELECT c.*, ca.anime, ca.character_name, ca.rarity, 
-                   ca.photo_file_id, ca.description
-            FROM collections c
-            JOIN cards ca ON c.card_id = ca.card_id
-            WHERE c.user_id = $1 AND ca.is_active = TRUE
-            ORDER BY ca.rarity DESC, ca.character_name
-            LIMIT $2 OFFSET $3
-        """
-        total = await db.fetchval(count_query, user_id)
-        cards = await db.fetch(main_query, user_id, per_page, offset)
-
-    return cards, total or 0
-
-
-async def get_user_collection_stats(pool: Optional[Pool], user_id: int) -> dict:
-    """Get statistics about a user's collection."""
-    if not db.is_connected:
-        return {
-            "total_unique": 0,
-            "total_cards": 0,
-            "mythical_plus": 0,
-            "legendary_count": 0,
-        }
-
-    query = """
-        SELECT 
-            COUNT(*) as total_unique,
-            COALESCE(SUM(c.quantity), 0) as total_cards,
-            COUNT(*) FILTER (WHERE ca.rarity >= 9) as mythical_plus,
-            COUNT(*) FILTER (WHERE ca.rarity = 11) as legendary_count
-        FROM collections c
-        JOIN cards ca ON c.card_id = ca.card_id
-        WHERE c.user_id = $1 AND ca.is_active = TRUE
-    """
-
-    row = await db.fetchrow(query, user_id)
-
-    if row:
-        return {
-            "total_unique": row["total_unique"] or 0,
-            "total_cards": int(row["total_cards"] or 0),
-            "mythical_plus": row["mythical_plus"] or 0,
-            "legendary_count": row["legendary_count"] or 0,
-        }
-    return {
-        "total_unique": 0,
-        "total_cards": 0,
-        "mythical_plus": 0,
-        "legendary_count": 0,
-    }
-
-
-async def check_user_has_card(pool: Optional[Pool], user_id: int, card_id: int) -> bool:
-    """Check if a user has a specific card in their collection."""
-    if not db.is_connected:
-        return False
-
-    query = """
-        SELECT EXISTS(
-            SELECT 1 FROM collections 
-            WHERE user_id = $1 AND card_id = $2
+        error_logger.error(
+            f"Card insert failed: anime={anime}, character={character}, "
+            f"rarity={rarity}, error={e}",
+            exc_info=True
         )
-    """
-    return await db.fetchval(query, user_id, card_id)
-
-
-async def toggle_favorite(pool: Optional[Pool], user_id: int, card_id: int) -> Optional[bool]:
-    """Toggle favorite status for a card in user's collection."""
-    if not db.is_connected:
-        return None
-
-    query = """
-        UPDATE collections 
-        SET is_favorite = NOT is_favorite
-        WHERE user_id = $1 AND card_id = $2
-        RETURNING is_favorite
-    """
-    return await db.fetchval(query, user_id, card_id)
+        raise
 
 
 # ============================================================
-# 👥 Group Operations
+# 🎴 Step 0: Upload Start
 # ============================================================
 
-async def ensure_group(pool: Optional[Pool], group_id: int, group_name: Optional[str] = None) -> Optional[Record]:
-    """Ensure a group exists in the database."""
-    if not db.is_connected:
-        return None
+async def upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle /upload command - Start the upload flow."""
+    user = update.effective_user
+    chat = update.effective_chat
 
-    query = """
-        INSERT INTO groups (group_id, group_name)
-        VALUES ($1, $2)
-        ON CONFLICT (group_id) DO UPDATE SET
-            group_name = COALESCE($2, groups.group_name),
-            is_active = TRUE
-        RETURNING *
-    """
-    return await db.fetchrow(query, group_id, group_name)
+    log_command(user.id, "upload", chat.id)
+
+    # Check if in private chat
+    if chat.type != ChatType.PRIVATE:
+        await update.message.reply_text(
+            "❌ *Upload Restricted*\n\n"
+            "Card uploads can only be done in private messages.\n"
+            f"Please message me directly: @{Config.BOT_USERNAME}",
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+
+    # Check admin permissions
+    if not Config.is_admin(user.id):
+        await update.message.reply_text(
+            "❌ *Permission Denied*\n\n"
+            "Only authorized uploaders can add new cards.\n"
+            "Contact an admin if you'd like to contribute!",
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+
+    # Check cooldown
+    is_cooldown, remaining = check_upload_cooldown(user.id)
+    if is_cooldown:
+        await update.message.reply_text(
+            f"⏳ *Too Fast!*\n\n"
+            f"Please wait {remaining} seconds before uploading another card.",
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+
+    # Ensure user exists in database
+    await ensure_user(
+        pool=None,
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name
+    )
+
+    # Initialize session
+    init_upload_session(context)
+
+    app_logger.info(f"📤 Upload started by user {user.id} ({user.first_name})")
+
+    # Show anime selection
+    return await show_anime_selection(update, context)
 
 
-async def get_all_groups(pool: Optional[Pool], active_only: bool = True) -> List[Record]:
-    """Get all registered groups."""
-    if not db.is_connected:
-        return []
+# ============================================================
+# 🟦 Step 1: Select Anime
+# ============================================================
 
-    if active_only:
-        query = "SELECT * FROM groups WHERE is_active = TRUE ORDER BY joined_at"
+async def show_anime_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Show anime selection menu."""
+    
+    # Get existing anime list
+    anime_list = await get_existing_anime_list()
+    
+    # Build keyboard
+    keyboard = []
+    
+    # Add existing anime (max 10 per page)
+    for anime in anime_list[:10]:
+        keyboard.append([
+            InlineKeyboardButton(f"🎬 {anime}", callback_data=f"upload_anime_select:{anime}")
+        ])
+    
+    # Show "More..." if there are more than 10
+    if len(anime_list) > 10:
+        keyboard.append([
+            InlineKeyboardButton(f"📄 More ({len(anime_list) - 10} more)...", callback_data="upload_anime_more")
+        ])
+    
+    # Add "New Anime" button
+    keyboard.append([
+        InlineKeyboardButton("➕ Add New Anime", callback_data="upload_anime_new")
+    ])
+    
+    # Cancel button
+    keyboard.append([
+        InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")
+    ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = (
+        "📤 *Card Upload - Step 1/5*\n\n"
+        "🎬 *Choose Anime for this card:*\n\n"
+        "Select an existing anime or add a new one.\n\n"
+        "💡 Anime names must be unique."
+    )
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+        await update.callback_query.answer()
     else:
-        query = "SELECT * FROM groups ORDER BY joined_at"
-
-    return await db.fetch(query)
-
-
-async def get_group_by_id(pool: Optional[Pool], group_id: int) -> Optional[Record]:
-    """Get a specific group by ID."""
-    if not db.is_connected:
-        return None
-
-    query = "SELECT * FROM groups WHERE group_id = $1"
-    return await db.fetchrow(query, group_id)
+        await update.message.reply_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+    
+    return SELECT_ANIME
 
 
-async def update_group_spawn(pool: Optional[Pool], group_id: int, card_id: int, message_id: int) -> None:
-    """Update the current spawned card in a group."""
-    if not db.is_connected:
-        return
-
-    query = """
-        UPDATE groups SET
-            current_card_id = $2,
-            current_card_message_id = $3,
-            last_spawn = NOW(),
-            total_spawns = total_spawns + 1
-        WHERE group_id = $1
-    """
-    await db.execute(query, group_id, card_id, message_id)
-
-
-async def clear_group_spawn(pool: Optional[Pool], group_id: int) -> None:
-    """Clear the current spawned card in a group after it's caught."""
-    if not db.is_connected:
-        return
-
-    query = """
-        UPDATE groups SET
-            current_card_id = NULL,
-            current_card_message_id = NULL,
-            total_catches = total_catches + 1
-        WHERE group_id = $1
-    """
-    await db.execute(query, group_id)
-
-
-async def update_group_settings(
-    pool: Optional[Pool],
-    group_id: int,
-    spawn_enabled: Optional[bool] = None,
-    cooldown_seconds: Optional[int] = None
-) -> Optional[Record]:
-    """Update group settings."""
-    if not db.is_connected:
-        return None
-
-    updates = []
-    values = [group_id]
-    param_count = 1
-
-    if spawn_enabled is not None:
-        param_count += 1
-        updates.append(f"spawn_enabled = ${param_count}")
-        values.append(spawn_enabled)
-
-    if cooldown_seconds is not None:
-        param_count += 1
-        updates.append(f"cooldown_seconds = ${param_count}")
-        values.append(cooldown_seconds)
-
-    if not updates:
-        return await get_group_by_id(pool, group_id)
-
-    query = f"""
-        UPDATE groups SET {', '.join(updates)}
-        WHERE group_id = $1
-        RETURNING *
-    """
-    return await db.fetchrow(query, *values)
+async def anime_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle anime selection callback."""
+    query = update.callback_query
+    data = query.data
+    
+    if data == "upload_anime_new":
+        await query.edit_message_text(
+            "📤 *Card Upload - Step 1/5*\n\n"
+            "🎬 *Enter the new Anime name:*\n\n"
+            "Type the anime/series name or /cancel to abort.\n\n"
+            "⚠️ Anime names must be unique in the database.",
+            parse_mode="Markdown"
+        )
+        await query.answer()
+        return ADD_NEW_ANIME
+    
+    elif data == "upload_anime_more":
+        await query.answer("Pagination coming soon! Use 'Add New Anime' for now.", show_alert=True)
+        return SELECT_ANIME
+    
+    elif data.startswith("upload_anime_select:"):
+        anime = data.replace("upload_anime_select:", "")
+        update_upload_data(context, anime=anime)
+        
+        app_logger.info(f"📤 User selected anime: {anime}")
+        
+        return await show_character_selection(update, context)
+    
+    return SELECT_ANIME
 
 
-async def deactivate_group(pool: Optional[Pool], group_id: int) -> None:
-    """Mark a group as inactive (bot left/kicked)."""
-    if not db.is_connected:
-        return
-
-    query = "UPDATE groups SET is_active = FALSE WHERE group_id = $1"
-    await db.execute(query, group_id)
+async def anime_text_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle new anime name input."""
+    anime_name = update.message.text.strip()
+    
+    # Validate
+    if len(anime_name) < 2:
+        await update.message.reply_text(
+            "⚠️ *Invalid Name*\n\n"
+            "Anime name must be at least 2 characters.\n"
+            "Please try again:",
+            parse_mode="Markdown"
+        )
+        return ADD_NEW_ANIME
+    
+    if len(anime_name) > 100:
+        await update.message.reply_text(
+            "⚠️ *Name Too Long*\n\n"
+            "Anime name must be under 100 characters.\n"
+            "Please try again:",
+            parse_mode="Markdown"
+        )
+        return ADD_NEW_ANIME
+    
+    # Check if anime already exists
+    existing_anime = await get_existing_anime_list()
+    if anime_name in existing_anime:
+        await update.message.reply_text(
+            f"⚠️ *Anime Already Exists*\n\n"
+            f"An anime named *{anime_name}* is already in the database.\n\n"
+            f"Please select it from the list or enter a different name:",
+            parse_mode="Markdown"
+        )
+        return ADD_NEW_ANIME
+    
+    # Save anime
+    update_upload_data(context, anime=anime_name)
+    
+    app_logger.info(f"📤 User added new anime: {anime_name}")
+    
+    return await show_character_selection(update, context)
 
 
 # ============================================================
-# 📊 Statistics & Analytics
+# 🟪 Step 2: Select Character
 # ============================================================
 
-async def get_global_stats(pool: Optional[Pool]) -> dict:
-    """Get global bot statistics."""
-    if not db.is_connected:
-        return {
-            "total_users": 0,
-            "total_cards": 0,
-            "total_catches": 0,
-            "active_groups": 0,
-        }
+async def show_character_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Show character selection menu."""
+    
+    upload_data = get_upload_data(context)
+    anime = upload_data.get('anime', 'Unknown')
+    
+    # Get existing characters for this anime
+    character_list = await get_characters_for_anime(anime)
+    
+    # Build keyboard
+    keyboard = []
+    
+    # Add existing characters
+    for character in character_list[:10]:
+        keyboard.append([
+            InlineKeyboardButton(f"👤 {character}", callback_data=f"upload_char_select:{character}")
+        ])
+    
+    # Show more if needed
+    if len(character_list) > 10:
+        keyboard.append([
+            InlineKeyboardButton(f"📄 More ({len(character_list) - 10} more)...", callback_data="upload_char_more")
+        ])
+    
+    # Add "New Character" button
+    keyboard.append([
+        InlineKeyboardButton("➕ Add New Character", callback_data="upload_char_new")
+    ])
+    
+    # Back and Cancel buttons
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="upload_back_anime"),
+        InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")
+    ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = (
+        "📤 *Card Upload - Step 2/5*\n\n"
+        f"🎬 *Anime:* {anime}\n\n"
+        "👤 *Choose Character for this card:*\n\n"
+        "Select an existing character or add a new one.\n\n"
+        "💡 Characters can be reused (different poses/rarities)."
+    )
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+        await update.callback_query.answer()
+    else:
+        await update.message.reply_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+    
+    return SELECT_CHARACTER
 
+
+async def character_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle character selection callback."""
+    query = update.callback_query
+    data = query.data
+    
+    if data == "upload_char_new":
+        upload_data = get_upload_data(context)
+        anime = upload_data.get('anime', 'Unknown')
+        
+        await query.edit_message_text(
+            "📤 *Card Upload - Step 2/5*\n\n"
+            f"🎬 *Anime:* {anime}\n\n"
+            "👤 *Enter the Character name:*\n\n"
+            "Type the character name or /cancel to abort.\n\n"
+            "💡 Same character can be used for multiple cards.",
+            parse_mode="Markdown"
+        )
+        await query.answer()
+        return ADD_NEW_CHARACTER
+    
+    elif data == "upload_char_more":
+        await query.answer("Pagination coming soon!", show_alert=True)
+        return SELECT_CHARACTER
+    
+    elif data.startswith("upload_char_select:"):
+        character = data.replace("upload_char_select:", "")
+        update_upload_data(context, character=character)
+        
+        app_logger.info(f"📤 User selected character: {character}")
+        
+        return await show_rarity_selection(update, context)
+    
+    elif data == "upload_back_anime":
+        await query.answer()
+        return await show_anime_selection(update, context)
+    
+    return SELECT_CHARACTER
+
+
+async def character_text_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle new character name input."""
+    character_name = update.message.text.strip()
+    
+    # Validate
+    if len(character_name) < 2:
+        await update.message.reply_text(
+            "⚠️ *Invalid Name*\n\n"
+            "Character name must be at least 2 characters.\n"
+            "Please try again:",
+            parse_mode="Markdown"
+        )
+        return ADD_NEW_CHARACTER
+    
+    if len(character_name) > 100:
+        await update.message.reply_text(
+            "⚠️ *Name Too Long*\n\n"
+            "Character name must be under 100 characters.\n"
+            "Please try again:",
+            parse_mode="Markdown"
+        )
+        return ADD_NEW_CHARACTER
+    
+    # Save character (no duplicate check)
+    update_upload_data(context, character=character_name)
+    
+    app_logger.info(f"📤 User added character: {character_name}")
+    
+    return await show_rarity_selection(update, context)
+
+
+# ============================================================
+# 🟫 Step 3: Select Rarity
+# ============================================================
+
+async def show_rarity_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Show rarity selection menu."""
+    
+    upload_data = get_upload_data(context)
+    anime = upload_data.get('anime', 'Unknown')
+    character = upload_data.get('character', 'Unknown')
+    
+    # Build keyboard with all rarities
+    keyboard = []
+    
+    # Add rarity buttons (2 per row)
+    rarity_buttons = []
+    for rarity_id in range(1, 12):
+        rarity_name, rarity_prob, rarity_emoji = rarity_to_text(rarity_id)
+        
+        button = InlineKeyboardButton(
+            f"{rarity_emoji} {rarity_name} ({rarity_prob}%)",
+            callback_data=f"upload_rarity:{rarity_id}"
+        )
+        
+        rarity_buttons.append(button)
+        
+        if len(rarity_buttons) == 2:
+            keyboard.append(rarity_buttons)
+            rarity_buttons = []
+    
+    if rarity_buttons:
+        keyboard.append(rarity_buttons)
+    
+    # Random rarity button
+    keyboard.append([
+        InlineKeyboardButton("🎲 Random Rarity", callback_data="upload_rarity:random")
+    ])
+    
+    # Back and Cancel buttons
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="upload_back_character"),
+        InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")
+    ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = (
+        "📤 *Card Upload - Step 3/5*\n\n"
+        f"🎬 *Anime:* {anime}\n"
+        f"👤 *Character:* {character}\n\n"
+        "✨ *Choose Rarity for this card:*\n\n"
+        "Select the rarity tier that fits this character."
+    )
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+        await update.callback_query.answer()
+    else:
+        await update.message.reply_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+    
+    return SELECT_RARITY
+
+
+async def rarity_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle rarity selection callback."""
+    query = update.callback_query
+    data = query.data
+    
+    if data.startswith("upload_rarity:"):
+        rarity_value = data.replace("upload_rarity:", "")
+        
+        if rarity_value == "random":
+            rarity_id = get_random_rarity()
+        else:
+            rarity_id = int(rarity_value)
+        
+        update_upload_data(context, rarity=rarity_id)
+        
+        rarity_name, _, rarity_emoji = rarity_to_text(rarity_id)
+        app_logger.info(f"📤 User selected rarity: {rarity_id} ({rarity_name})")
+        
+        await query.answer(f"Selected: {rarity_emoji} {rarity_name}")
+        
+        return await show_photo_upload(update, context)
+    
+    elif data == "upload_back_character":
+        await query.answer()
+        return await show_character_selection(update, context)
+    
+    return SELECT_RARITY
+
+
+# ============================================================
+# 🟥 Step 4: Upload Photo
+# ============================================================
+
+async def show_photo_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Show photo upload prompt."""
+    
+    upload_data = get_upload_data(context)
+    anime = upload_data.get('anime', 'Unknown')
+    character = upload_data.get('character', 'Unknown')
+    rarity = upload_data.get('rarity', 1)
+    
+    rarity_name, rarity_prob, rarity_emoji = rarity_to_text(rarity)
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="upload_back_rarity"),
+            InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")
+        ]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = (
+        "📤 *Card Upload - Step 4/5*\n\n"
+        f"🎬 *Anime:* {anime}\n"
+        f"👤 *Character:* {character}\n"
+        f"✨ *Rarity:* {rarity_emoji} {rarity_name}\n\n"
+        "🖼️ *Send the card photo:*\n\n"
+        "Send an image (as photo, not document).\n"
+        "💡 Best quality: PNG or JPG, under 5MB\n\n"
+        "⚠️ Duplicate photos will be detected."
+    )
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+        await update.callback_query.answer()
+    else:
+        await update.message.reply_text(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+    
+    return UPLOAD_PHOTO
+
+
+async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle photo upload."""
+    message = update.message
+    
+    photo_file_id: Optional[str] = None
+    
+    if message.photo:
+        photo: PhotoSize = message.photo[-1]
+        photo_file_id = photo.file_id
+        app_logger.info(f"📤 Received photo from user {message.from_user.id}")
+    
+    elif message.document:
+        doc: Document = message.document
+        
+        if doc.mime_type and doc.mime_type.startswith("image/"):
+            photo_file_id = doc.file_id
+            app_logger.info(f"📤 Received document image from user {message.from_user.id}")
+        else:
+            await message.reply_text(
+                "❌ *Invalid File Type*\n\n"
+                "Please send an image file (JPG, PNG, etc.)",
+                parse_mode="Markdown"
+            )
+            return UPLOAD_PHOTO
+    
+    if not photo_file_id:
+        await message.reply_text(
+            "❌ *No Image Detected*\n\n"
+            "Please send a photo (📷) or image file (📎).",
+            parse_mode="Markdown"
+        )
+        return UPLOAD_PHOTO
+    
+    # Generate hash
+    photo_hash = generate_photo_hash(photo_file_id)
+    
+    # Save photo
+    update_upload_data(context, photo_file_id=photo_file_id, photo_hash=photo_hash)
+    
+    app_logger.info(f"📤 Photo saved with hash: {photo_hash[:16]}...")
+    
+    return await show_preview(update, context)
+
+
+# ============================================================
+# 🟩 Step 5: Preview & Confirmation
+# ============================================================
+
+async def show_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Show preview with confirmation buttons."""
+    
+    upload_data = get_upload_data(context)
+    anime = upload_data.get('anime', 'Unknown')
+    character = upload_data.get('character', 'Unknown')
+    rarity = upload_data.get('rarity', 1)
+    photo_file_id = upload_data.get('photo_file_id')
+    
+    rarity_name, rarity_prob, rarity_emoji = rarity_to_text(rarity)
+    
+    caption = (
+        "🔎 *Preview*\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎬 *Anime:* {anime}\n"
+        f"👤 *Character:* {character}\n"
+        f"✨ *Rarity:* {rarity_emoji} {rarity_name} ({rarity_prob}%)\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Press *Confirm & Save* to add this card.\n\n"
+        "⚠️ Duplicate check will run on confirmation."
+    )
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Confirm & Save", callback_data="upload_confirm"),
+        ],
+        [
+            InlineKeyboardButton("✏️ Edit", callback_data="upload_edit"),
+            InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")
+        ]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.callback_query:
+        await update.callback_query.message.reply_photo(
+            photo=photo_file_id,
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+        await update.callback_query.answer("Preview generated!")
+    else:
+        await update.message.reply_photo(
+            photo=photo_file_id,
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+    
+    return PREVIEW_CONFIRM
+
+
+# ============================================================
+# 🟩 Step 6: Confirm & Save (FIXED - Production Ready)
+# ============================================================
+
+async def confirm_upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Handle upload confirmation with photo duplicate detection.
+    
+    Production-ready with:
+    - Immediate callback answer
+    - Photo-only duplicate check
+    - Direct database insert
+    - Comprehensive error handling
+    """
+    query = update.callback_query
+    user = query.from_user
+    
+    # Answer immediately
+    await query.answer()
+    
+    # Get upload data
+    upload_data = get_upload_data(context)
+    anime = upload_data.get('anime')
+    character = upload_data.get('character')
+    rarity = upload_data.get('rarity')
+    photo_file_id = upload_data.get('photo_file_id')
+    
+    # Validate
+    if not all([anime, character, rarity, photo_file_id]):
+        await query.edit_message_caption(
+            caption=(
+                "❌ *Upload Error*\n\n"
+                "Some data is missing. Please try again.\n\n"
+                "Use /upload to restart."
+            ),
+            parse_mode="Markdown"
+        )
+        clear_upload_data(context)
+        return ConversationHandler.END
+    
+    # Show processing
     try:
-        stats = {}
-
-        stats["total_users"] = await db.fetchval("SELECT COUNT(*) FROM users") or 0
-        stats["total_cards"] = await db.fetchval("SELECT COUNT(*) FROM cards WHERE is_active = TRUE") or 0
-        stats["total_catches"] = int(await db.fetchval("SELECT COALESCE(SUM(total_catches), 0) FROM users") or 0)
-        stats["active_groups"] = await db.fetchval("SELECT COUNT(*) FROM groups WHERE is_active = TRUE") or 0
-
-        return stats
-
-    except Exception as e:
-        error_logger.error(f"Error getting global stats: {e}")
-        return {
-            "total_users": 0,
-            "total_cards": 0,
-            "total_catches": 0,
-            "active_groups": 0,
-        }
-
-
-async def get_rarity_distribution(pool: Optional[Pool]) -> List[Record]:
-    """Get the distribution of cards by rarity."""
-    if not db.is_connected:
-        return []
-
-    query = """
-        SELECT rarity, COUNT(*) as count
-        FROM cards
-        WHERE is_active = TRUE
-        GROUP BY rarity
-        ORDER BY rarity
-    """
-    return await db.fetch(query)
-
-
-async def get_top_catchers(pool: Optional[Pool], limit: int = 10) -> List[Record]:
-    """Get top users by total catches."""
-    if not db.is_connected:
-        return []
-
-    query = """
-        SELECT user_id, username, first_name, total_catches, level, coins
-        FROM users
-        WHERE is_banned = FALSE AND total_catches > 0
-        ORDER BY total_catches DESC
-        LIMIT $1
-    """
-    return await db.fetch(query, limit)
-
-
-async def get_rarest_cards(pool: Optional[Pool], limit: int = 10) -> List[Record]:
-    """Get the rarest cards in the database."""
-    if not db.is_connected:
-        return []
-
-    query = """
-        SELECT * FROM cards
-        WHERE is_active = TRUE
-        ORDER BY rarity DESC, total_caught ASC
-        LIMIT $1
-    """
-    return await db.fetch(query, limit)
-
-
-# ============================================================
-# 🛠️ Maintenance Functions
-# ============================================================
-
-async def cleanup_inactive_groups(pool: Optional[Pool], days_inactive: int = 30) -> int:
-    """Mark groups as inactive if no activity for specified days."""
-    if not db.is_connected:
-        return 0
-
-    query = f"""
-        UPDATE groups SET is_active = FALSE
-        WHERE last_spawn < NOW() - INTERVAL '{days_inactive} days'
-          AND is_active = TRUE
-        RETURNING group_id
-    """
-    result = await db.fetch(query)
-    return len(result)
-
-
-async def health_check(pool: Optional[Pool]) -> bool:
-    """Perform a database health check."""
-    if not db.is_connected:
-        return False
-
-    try:
-        await db.fetchval("SELECT 1")
-        return True
-    except Exception as e:
-        error_logger.error(f"Database health check failed: {e}")
-        return False
-
-
-async def get_database_size(pool: Optional[Pool]) -> Optional[str]:
-    """Get the total database size."""
-    if not db.is_connected:
-        return None
-
-    try:
-        query = "SELECT pg_size_pretty(pg_database_size(current_database()))"
-        return await db.fetchval(query)
+        await query.edit_message_caption(
+            caption=(
+                "⏳ *Processing...*\n\n"
+                "🔍 Checking for duplicate photos...\n"
+                "💾 Saving card to database...\n\n"
+                "Please wait."
+            ),
+            parse_mode="Markdown"
+        )
     except Exception:
-        return None
-
-
-async def get_table_counts(pool: Optional[Pool]) -> dict:
-    """Get row counts for all tables."""
-    if not db.is_connected:
-        return {}
-
+        pass
+    
     try:
-        return {
-            "users": await db.fetchval("SELECT COUNT(*) FROM users") or 0,
-            "cards": await db.fetchval("SELECT COUNT(*) FROM cards") or 0,
-            "collections": await db.fetchval("SELECT COUNT(*) FROM collections") or 0,
-            "groups": await db.fetchval("SELECT COUNT(*) FROM groups") or 0,
-            "trades": await db.fetchval("SELECT COUNT(*) FROM trades") or 0,
-        }
-    except Exception:
-        return {}
-
-
-# ============================================================
-# 📦 PART 4: Collection Functions (Enhanced)
-# ============================================================
-
-async def get_collection_cards(
-    pool: Optional[Pool],
-    user_id: int,
-    offset: int = 0,
-    limit: int = 10,
-    rarity_filter: Optional[int] = None
-) -> List[Record]:
-    """Get a user's collection cards with pagination."""
-    if not db.is_connected:
-        return []
-
-    try:
-        if rarity_filter:
-            query = """
-                SELECT 
-                    c.collection_id, c.user_id, c.card_id, c.quantity,
-                    c.caught_at, c.is_favorite,
-                    ca.anime, ca.character_name, ca.rarity,
-                    ca.photo_file_id, ca.total_caught
-                FROM collections c
-                JOIN cards ca ON c.card_id = ca.card_id
-                WHERE c.user_id = $1 
-                  AND ca.is_active = TRUE 
-                  AND ca.rarity = $4
-                  AND c.quantity > 0
-                ORDER BY ca.rarity DESC, ca.character_name ASC
-                LIMIT $2 OFFSET $3
-            """
-            return await db.fetch(query, user_id, limit, offset, rarity_filter)
-        else:
-            query = """
-                SELECT 
-                    c.collection_id, c.user_id, c.card_id, c.quantity,
-                    c.caught_at, c.is_favorite,
-                    ca.anime, ca.character_name, ca.rarity,
-                    ca.photo_file_id, ca.total_caught
-                FROM collections c
-                JOIN cards ca ON c.card_id = ca.card_id
-                WHERE c.user_id = $1 
-                  AND ca.is_active = TRUE
-                  AND c.quantity > 0
-                ORDER BY ca.rarity DESC, ca.character_name ASC
-                LIMIT $2 OFFSET $3
-            """
-            return await db.fetch(query, user_id, limit, offset)
-    except Exception as e:
-        error_logger.error(f"Error getting collection cards: {e}", exc_info=True)
-        return []
-
-
-async def get_collection_count(
-    pool: Optional[Pool],
-    user_id: int,
-    rarity_filter: Optional[int] = None
-) -> int:
-    """Get total count of cards in a user's collection."""
-    if not db.is_connected:
-        return 0
-
-    try:
-        if rarity_filter:
-            query = """
-                SELECT COUNT(*) FROM collections c
-                JOIN cards ca ON c.card_id = ca.card_id
-                WHERE c.user_id = $1 
-                  AND ca.is_active = TRUE 
-                  AND ca.rarity = $2
-                  AND c.quantity > 0
-            """
-            result = await db.fetchval(query, user_id, rarity_filter)
-        else:
-            query = """
-                SELECT COUNT(*) FROM collections c
-                JOIN cards ca ON c.card_id = ca.card_id
-                WHERE c.user_id = $1 
-                  AND ca.is_active = TRUE
-                  AND c.quantity > 0
-            """
-            result = await db.fetchval(query, user_id)
-
-        return result or 0
-    except Exception as e:
-        error_logger.error(f"Error getting collection count: {e}", exc_info=True)
-        return 0
-
-
-async def get_card_with_details(pool: Optional[Pool], card_id: int) -> Optional[Record]:
-    """Get card with full details including catch statistics."""
-    if not db.is_connected:
-        return None
-
-    try:
-        query = """
-            SELECT 
-                c.*,
-                (SELECT COUNT(DISTINCT user_id) FROM collections WHERE card_id = c.card_id AND quantity > 0) as unique_owners,
-                (SELECT COALESCE(SUM(quantity), 0) FROM collections WHERE card_id = c.card_id) as total_in_circulation
-            FROM cards c
-            WHERE c.card_id = $1 AND c.is_active = TRUE
-        """
-        return await db.fetchrow(query, card_id)
-    except Exception as e:
-        error_logger.error(f"Error getting card details: {e}", exc_info=True)
-        return None
-
-
-async def get_card_owners(pool: Optional[Pool], card_id: int, limit: int = 5) -> List[Record]:
-    """Get top owners of a specific card."""
-    if not db.is_connected:
-        return []
-
-    try:
-        query = """
-            SELECT 
-                u.user_id, u.first_name, u.username, 
-                c.quantity, c.caught_at, c.is_favorite
-            FROM collections c
-            JOIN users u ON c.user_id = u.user_id
-            WHERE c.card_id = $1 AND c.quantity > 0
-            ORDER BY c.quantity DESC, c.caught_at ASC
-            LIMIT $2
-        """
-        return await db.fetch(query, card_id, limit)
-    except Exception as e:
-        error_logger.error(f"Error getting card owners: {e}", exc_info=True)
-        return []
-
-
-async def check_user_owns_card(
-    pool: Optional[Pool],
-    user_id: int,
-    card_id: int,
-    min_quantity: int = 1
-) -> bool:
-    """Check if a user owns at least min_quantity of a card."""
-    if not db.is_connected:
-        return False
-
-    try:
-        query = "SELECT quantity FROM collections WHERE user_id = $1 AND card_id = $2"
-        result = await db.fetchval(query, user_id, card_id)
-        return (result or 0) >= min_quantity
-    except Exception as e:
-        error_logger.error(f"Error checking card ownership: {e}", exc_info=True)
-        return False
-
-
-async def get_user_card_quantity(pool: Optional[Pool], user_id: int, card_id: int) -> int:
-    """Get how many of a specific card a user owns."""
-    if not db.is_connected:
-        return 0
-
-    try:
-        query = "SELECT quantity FROM collections WHERE user_id = $1 AND card_id = $2"
-        result = await db.fetchval(query, user_id, card_id)
-        return result or 0
-    except Exception as e:
-        error_logger.error(f"Error getting card quantity: {e}", exc_info=True)
-        return 0
-
-
-# ============================================================
-# 🔄 PART 4: Trade Functions
-# ============================================================
-
-async def create_trade(
-    pool: Optional[Pool],
-    from_user: int,
-    to_user: int,
-    offered_card_id: int,
-    requested_card_id: Optional[int] = None
-) -> Optional[int]:
-    """Create a new trade request."""
-    if not db.is_connected:
-        return None
-
-    if from_user == to_user:
-        return None
-
-    try:
-        query = """
-            INSERT INTO trades (from_user, to_user, offered_card_id, requested_card_id, status)
-            VALUES ($1, $2, $3, $4, 'pending')
-            RETURNING id
-        """
-        result = await db.fetchval(query, from_user, to_user, offered_card_id, requested_card_id)
-        return result
-    except Exception as e:
-        error_logger.error(f"Error creating trade: {e}", exc_info=True)
-        return None
-
-
-async def get_trade(pool: Optional[Pool], trade_id: int) -> Optional[Record]:
-    """Get a trade by ID with full details."""
-    if not db.is_connected:
-        return None
-
-    try:
-        query = """
-            SELECT 
-                t.*,
-                fu.first_name as from_user_name, fu.username as from_username,
-                tu.first_name as to_user_name, tu.username as to_username,
-                oc.character_name as offered_character, oc.anime as offered_anime,
-                oc.rarity as offered_rarity, oc.photo_file_id as offered_photo,
-                rc.character_name as requested_character, rc.anime as requested_anime,
-                rc.rarity as requested_rarity, rc.photo_file_id as requested_photo
-            FROM trades t
-            JOIN users fu ON t.from_user = fu.user_id
-            JOIN users tu ON t.to_user = tu.user_id
-            JOIN cards oc ON t.offered_card_id = oc.card_id
-            LEFT JOIN cards rc ON t.requested_card_id = rc.card_id
-            WHERE t.id = $1
-        """
-        return await db.fetchrow(query, trade_id)
-    except Exception as e:
-        error_logger.error(f"Error getting trade: {e}", exc_info=True)
-        return None
-
-
-async def list_pending_trades_for_user(
-    pool: Optional[Pool],
-    user_id: int,
-    as_recipient: bool = True,
-    limit: int = 20
-) -> List[Record]:
-    """List pending trades for a user."""
-    if not db.is_connected:
-        return []
-
-    try:
-        if as_recipient:
-            query = """
-                SELECT t.*, fu.first_name as from_user_name, fu.username as from_username,
-                       oc.character_name as offered_character, oc.anime as offered_anime, oc.rarity as offered_rarity,
-                       rc.character_name as requested_character, rc.anime as requested_anime, rc.rarity as requested_rarity
-                FROM trades t
-                JOIN users fu ON t.from_user = fu.user_id
-                JOIN cards oc ON t.offered_card_id = oc.card_id
-                LEFT JOIN cards rc ON t.requested_card_id = rc.card_id
-                WHERE t.to_user = $1 AND t.status = 'pending'
-                ORDER BY t.created_at DESC LIMIT $2
-            """
-        else:
-            query = """
-                SELECT t.*, tu.first_name as to_user_name, tu.username as to_username,
-                       oc.character_name as offered_character, oc.anime as offered_anime, oc.rarity as offered_rarity,
-                       rc.character_name as requested_character, rc.anime as requested_anime, rc.rarity as requested_rarity
-                FROM trades t
-                JOIN users tu ON t.to_user = tu.user_id
-                JOIN cards oc ON t.offered_card_id = oc.card_id
-                LEFT JOIN cards rc ON t.requested_card_id = rc.card_id
-                WHERE t.from_user = $1 AND t.status = 'pending'
-                ORDER BY t.created_at DESC LIMIT $2
-            """
-        return await db.fetch(query, user_id, limit)
-    except Exception as e:
-        error_logger.error(f"Error listing pending trades: {e}", exc_info=True)
-        return []
-
-
-async def count_pending_trades(pool: Optional[Pool], user_id: int) -> int:
-    """Count total pending trades for a user."""
-    if not db.is_connected:
-        return 0
-
-    try:
-        query = """
-            SELECT COUNT(*) FROM trades
-            WHERE (from_user = $1 OR to_user = $1) AND status = 'pending'
-        """
-        result = await db.fetchval(query, user_id)
-        return result or 0
-    except Exception as e:
-        error_logger.error(f"Error counting pending trades: {e}", exc_info=True)
-        return 0
-
-
-async def update_trade_status(pool: Optional[Pool], trade_id: int, status: str) -> bool:
-    """Update a trade's status."""
-    if not db.is_connected:
-        return False
-
-    valid_statuses = {'pending', 'accepted', 'rejected', 'cancelled', 'completed', 'failed'}
-    if status not in valid_statuses:
-        return False
-
-    try:
-        query = "UPDATE trades SET status = $2 WHERE id = $1 RETURNING id"
-        result = await db.fetchval(query, trade_id, status)
-        return result is not None
-    except Exception as e:
-        error_logger.error(f"Error updating trade status: {e}", exc_info=True)
-        return False
-
-
-async def transfer_card_between_users(
-    pool: Optional[Pool],
-    from_user: int,
-    to_user: int,
-    card_id: int,
-    quantity: int = 1
-) -> tuple[bool, str]:
-    """Atomically transfer a card from one user to another."""
-    if not db.is_connected:
-        return False, "Database not connected"
-
-    if from_user == to_user:
-        return False, "Cannot transfer to yourself"
-
-    if quantity < 1:
-        return False, "Invalid quantity"
-
-    try:
-        async with db.pool.acquire() as conn:
-            async with conn.transaction():
-                sender_qty = await conn.fetchval(
-                    "SELECT quantity FROM collections WHERE user_id = $1 AND card_id = $2 FOR UPDATE",
-                    from_user, card_id
-                )
-
-                if sender_qty is None or sender_qty < quantity:
-                    return False, f"Insufficient cards (have: {sender_qty or 0}, need: {quantity})"
-
-                new_sender_qty = sender_qty - quantity
-
-                if new_sender_qty <= 0:
-                    await conn.execute(
-                        "DELETE FROM collections WHERE user_id = $1 AND card_id = $2",
-                        from_user, card_id
+        # Check for duplicate photo
+        photo_exists, existing_card_id = await check_photo_exists(photo_file_id)
+        
+        if photo_exists:
+            # Duplicate found
+            app_logger.warning(
+                f"📤 Duplicate photo for user {user.id}: "
+                f"file_id={photo_file_id[:20]}... (Card #{existing_card_id})"
+            )
+            
+            # Get existing card info
+            try:
+                from db import get_card_by_id
+                existing_card = await get_card_by_id(None, existing_card_id)
+                
+                if existing_card:
+                    existing_char = existing_card.get('character_name', 'Unknown')
+                    existing_anime = existing_card.get('anime', 'Unknown')
+                    existing_rarity = existing_card.get('rarity', 1)
+                    
+                    _, _, existing_rarity_emoji = rarity_to_text(existing_rarity)
+                    
+                    duplicate_msg = (
+                        f"This image is already used for:\n\n"
+                        f"🎬 *Anime:* {existing_anime}\n"
+                        f"👤 *Character:* {existing_char}\n"
+                        f"✨ *Rarity:* {existing_rarity_emoji}\n"
+                        f"🆔 *Card ID:* `#{existing_card_id}`"
                     )
                 else:
-                    await conn.execute(
-                        "UPDATE collections SET quantity = $3 WHERE user_id = $1 AND card_id = $2",
-                        from_user, card_id, new_sender_qty
-                    )
-
-                await conn.execute(
-                    """
-                    INSERT INTO collections (user_id, card_id, quantity, caught_at)
-                    VALUES ($1, $2, $3, NOW())
-                    ON CONFLICT (user_id, card_id) DO UPDATE
-                    SET quantity = collections.quantity + $3
-                    """,
-                    to_user, card_id, quantity
+                    duplicate_msg = f"This image exists as Card `#{existing_card_id}`"
+            except Exception as e:
+                error_logger.error(f"Error getting existing card: {e}")
+                duplicate_msg = "This image already exists"
+            
+            # Build options
+            keyboard = [
+                [InlineKeyboardButton("🖼 Different Photo", callback_data="upload_edit_photo")],
+                [InlineKeyboardButton("✏️ Edit Fields", callback_data="upload_edit")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")]
+            ]
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_caption(
+                caption=(
+                    "⚠️ *Duplicate Photo Detected!*\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{duplicate_msg}\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "🚫 *Why this matters:*\n"
+                    "Each card must have a unique image.\n\n"
+                    "✅ *What's allowed:*\n"
+                    "• Same character, different image ✓\n"
+                    "• Same anime, different character ✓\n\n"
+                    "❌ *Not allowed:*\n"
+                    "• Same exact image ✗\n\n"
+                    "💡 Please upload a different photo."
+                ),
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+            
+            return PREVIEW_CONFIRM
+        
+        # No duplicate - insert card
+        rarity_name, rarity_prob, rarity_emoji = rarity_to_text(rarity)
+        
+        app_logger.info(
+            f"📤 Inserting card: {character} ({anime}) - "
+            f"{rarity_emoji} {rarity_name} by user {user.id}"
+        )
+        
+        # Insert directly into database
+        card = await insert_card_direct(
+            anime=anime,
+            character=character,
+            rarity=rarity,
+            photo_file_id=photo_file_id,
+            uploader_id=user.id
+        )
+        
+        if card is None:
+            raise Exception("Failed to insert card")
+        
+        card_id = card["card_id"]
+        
+        # Success!
+        set_upload_cooldown(user.id)
+        total_cards = await get_card_count(None)
+        
+        app_logger.info(
+            f"✅ Card #{card_id} saved: {character} ({anime}) - "
+            f"{rarity_emoji} {rarity_name}"
+        )
+        
+        # Success message
+        success_caption = (
+            "🎉 *Card Uploaded Successfully!*\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 *Card ID:* `#{card_id}`\n"
+            f"🎬 *Anime:* {anime}\n"
+            f"👤 *Character:* {character}\n"
+            f"✨ *Rarity:* {rarity_emoji} {rarity_name} ({rarity_prob}%)\n"
+            f"👤 *Uploaded by:* {user.first_name}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📦 *Total cards:* {total_cards:,}\n"
+            f"🎯 *Now available for catching!*\n\n"
+            f"Use /cardinfo {card_id} to view.\n"
+            f"Use /upload to add another."
+        )
+        
+        await query.edit_message_caption(
+            caption=success_caption,
+            parse_mode="Markdown"
+        )
+        
+        clear_upload_data(context)
+        
+        return ConversationHandler.END
+        
+    except Exception as e:
+        # Error handling
+        error_logger.error(
+            f"Upload error for user {user.id}: {type(e).__name__}: {e}",
+            exc_info=True
+        )
+        
+        # Determine error type
+        error_type = type(e).__name__
+        error_msg = str(e)
+        
+        # User-friendly messages
+        if "duplicate key" in error_msg.lower():
+            friendly_msg = "This card already exists.\nTry a different image."
+        elif "constraint" in error_msg.lower():
+            friendly_msg = "Database constraint error.\nTry a different combination."
+        elif "connection" in error_msg.lower():
+            friendly_msg = "Database connection error.\nPlease try again."
+        else:
+            friendly_msg = f"Error: {error_msg[:100]}"
+        
+        # Retry keyboard
+        keyboard = [
+            [InlineKeyboardButton("🔄 Try Again", callback_data="upload_confirm")],
+            [InlineKeyboardButton("✏️ Edit", callback_data="upload_edit")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="upload_cancel")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        try:
+            await query.edit_message_caption(
+                caption=(
+                    "❌ *Upload Failed*\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"**Type:** {error_type}\n\n"
+                    f"{friendly_msg}\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "💡 *Options:*\n"
+                    "• Try again (temporary error)\n"
+                    "• Edit your data\n"
+                    "• Cancel and restart"
+                ),
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        except Exception:
+            try:
+                await query.message.reply_text(
+                    f"❌ Upload failed: {friendly_msg}\n\n"
+                    "Use /upload to try again.",
+                    parse_mode="Markdown"
                 )
+            except Exception:
+                pass
+        
+        return PREVIEW_CONFIRM
 
-                return True, "Transfer successful"
+
+# ============================================================
+# 🟨 Step 7: Edit Menu
+# ============================================================
+
+async def show_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Show edit menu."""
+    query = update.callback_query
+    
+    upload_data = get_upload_data(context)
+    anime = upload_data.get('anime', 'Unknown')
+    character = upload_data.get('character', 'Unknown')
+    rarity = upload_data.get('rarity', 1)
+    
+    rarity_name, _, rarity_emoji = rarity_to_text(rarity)
+    
+    keyboard = [
+        [InlineKeyboardButton("🎬 Edit Anime", callback_data="upload_edit_anime")],
+        [InlineKeyboardButton("👤 Edit Character", callback_data="upload_edit_character")],
+        [InlineKeyboardButton("💠 Edit Rarity", callback_data="upload_edit_rarity")],
+        [InlineKeyboardButton("🖼 Edit Photo", callback_data="upload_edit_photo")],
+        [InlineKeyboardButton("⬅️ Back to Preview", callback_data="upload_back_preview")],
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = (
+        "✏️ *Edit Upload*\n\n"
+        "Current values:\n"
+        f"🎬 Anime: {anime}\n"
+        f"👤 Character: {character}\n"
+        f"✨ Rarity: {rarity_emoji} {rarity_name}\n\n"
+        "What do you want to edit?"
+    )
+    
+    await query.edit_message_text(
+        text=text,
+        parse_mode="Markdown",
+        reply_markup=reply_markup
+    )
+    await query.answer()
+    
+    return PREVIEW_CONFIRM
+
+
+async def edit_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle edit selection."""
+    query = update.callback_query
+    data = query.data
+    
+    if data == "upload_edit_anime":
+        await query.answer()
+        return await show_anime_selection(update, context)
+    
+    elif data == "upload_edit_character":
+        await query.answer()
+        return await show_character_selection(update, context)
+    
+    elif data == "upload_edit_rarity":
+        await query.answer()
+        return await show_rarity_selection(update, context)
+    
+    elif data == "upload_edit_photo":
+        await query.answer()
+        return await show_photo_upload(update, context)
+    
+    elif data == "upload_back_preview":
+        await query.answer()
+        return await show_preview(update, context)
+    
+    return PREVIEW_CONFIRM
+
+
+# ============================================================
+# 🟥 Cancel Handlers
+# ============================================================
+
+async def upload_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle upload cancellation via callback."""
+    query = update.callback_query
+    
+    clear_upload_data(context)
+    
+    await query.edit_message_text(
+        "❌ *Upload Cancelled*\n\n"
+        "Temporary data cleared.\n"
+        "Use /upload to start again.",
+        parse_mode="Markdown"
+    )
+    
+    await query.answer("Upload cancelled")
+    
+    app_logger.info(f"📤 Upload cancelled by user {query.from_user.id}")
+    
+    return ConversationHandler.END
+
+
+async def upload_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle /cancel command."""
+    clear_upload_data(context)
+    
+    await update.message.reply_text(
+        "❌ *Upload Cancelled*\n\n"
+        "Use /upload to start again.",
+        parse_mode="Markdown"
+    )
+    
+    return ConversationHandler.END
+
+
+# ============================================================
+# 🔧 Back Navigation
+# ============================================================
+
+async def back_navigation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle back navigation."""
+    query = update.callback_query
+    data = query.data
+    
+    if data == "upload_back_rarity":
+        await query.answer()
+        return await show_rarity_selection(update, context)
+    
+    return UPLOAD_PHOTO
+
+
+# ============================================================
+# 📤 Quick Upload (Admin Shortcut)
+# ============================================================
+
+async def quick_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Quick upload: /quickupload Anime | Character | Rarity"""
+    user = update.effective_user
+    message = update.message
+
+    if not Config.is_admin(user.id):
+        await message.reply_text("❌ Admin only.")
+        return
+
+    if not message.reply_to_message or not message.reply_to_message.photo:
+        await message.reply_text(
+            "📤 *Quick Upload*\n\n"
+            "Reply to a photo:\n"
+            "`/quickupload Anime | Character | Rarity`\n\n"
+            "Example:\n"
+            "`/quickupload Naruto | Itachi | 8`",
+            parse_mode="Markdown"
+        )
+        return
+
+    args_text = message.text.replace("/quickupload", "").strip()
+
+    if not args_text:
+        await message.reply_text("❌ Format: `Anime | Character | Rarity`", parse_mode="Markdown")
+        return
+
+    parts = [p.strip() for p in args_text.split("|")]
+
+    if len(parts) < 2:
+        await message.reply_text("❌ Format: `Anime | Character | Rarity`", parse_mode="Markdown")
+        return
+
+    anime = parts[0]
+    character = parts[1]
+    rarity_id = None
+
+    if len(parts) >= 3:
+        rarity_input = parts[2].strip().lower()
+
+        if rarity_input.isdigit():
+            rarity_id = int(rarity_input)
+            if not 1 <= rarity_id <= 11:
+                rarity_id = None
+        elif rarity_input == "random":
+            rarity_id = None
+        else:
+            rarity_names = {
+                "normal": 1, "common": 2, "uncommon": 3, "rare": 4,
+                "epic": 5, "limited": 6, "platinum": 7, "emerald": 8,
+                "crystal": 9, "mythical": 10, "legendary": 11
+            }
+            rarity_id = rarity_names.get(rarity_input)
+
+    if rarity_id is None:
+        rarity_id = get_random_rarity()
+
+    photo_file_id = message.reply_to_message.photo[-1].file_id
+    
+    # Check duplicate
+    photo_exists, existing_card_id = await check_photo_exists(photo_file_id)
+    
+    if photo_exists:
+        await message.reply_text(
+            f"⚠️ Duplicate photo!\n"
+            f"Already exists as Card `#{existing_card_id}`.",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        card = await insert_card_direct(
+            anime=anime,
+            character=character,
+            rarity=rarity_id,
+            photo_file_id=photo_file_id,
+            uploader_id=user.id
+        )
+
+        if card:
+            rarity_name, _, rarity_emoji = rarity_to_text(rarity_id)
+            await message.reply_text(
+                f"✅ *Quick Upload Success!*\n\n"
+                f"🆔 ID: `#{card['card_id']}`\n"
+                f"🎬 {anime}\n"
+                f"👤 {character}\n"
+                f"✨ {rarity_emoji} {rarity_name}",
+                parse_mode="Markdown"
+            )
+        else:
+            await message.reply_text("⚠️ Failed to save!")
 
     except Exception as e:
-        error_logger.error(f"Error transferring card: {e}", exc_info=True)
-        return False, f"Transfer failed: {str(e)}"
+        error_logger.error(f"Quick upload failed: {e}", exc_info=True)
+        await message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+# ============================================================
+# 🔧 Handlers Export
+# ============================================================
+
+upload_conversation_handler = ConversationHandler(
+    entry_points=[
+        CommandHandler("upload", upload_start),
+    ],
+    states={
+        SELECT_ANIME: [
+            CallbackQueryHandler(anime_selected_callback, pattern=r"^upload_anime_"),
+            CallbackQueryHandler(upload_cancel_callback, pattern=r"^upload_cancel$"),
+        ],
+        ADD_NEW_ANIME: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, anime_text_received),
+        ],
+        SELECT_CHARACTER: [
+            CallbackQueryHandler(character_selected_callback, pattern=r"^upload_char_"),
+            CallbackQueryHandler(character_selected_callback, pattern=r"^upload_back_anime$"),
+            CallbackQueryHandler(upload_cancel_callback, pattern=r"^upload_cancel$"),
+        ],
+        ADD_NEW_CHARACTER: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, character_text_received),
+        ],
+        SELECT_RARITY: [
+            CallbackQueryHandler(rarity_selected_callback, pattern=r"^upload_rarity:"),
+            CallbackQueryHandler(rarity_selected_callback, pattern=r"^upload_back_character$"),
+            CallbackQueryHandler(upload_cancel_callback, pattern=r"^upload_cancel$"),
+        ],
+        UPLOAD_PHOTO: [
+            MessageHandler(filters.PHOTO | filters.Document.IMAGE, photo_received),
+            CallbackQueryHandler(back_navigation_callback, pattern=r"^upload_back_rarity$"),
+            CallbackQueryHandler(upload_cancel_callback, pattern=r"^upload_cancel$"),
+        ],
+        PREVIEW_CONFIRM: [
+            CallbackQueryHandler(confirm_upload_callback, pattern=r"^upload_confirm$"),
+            CallbackQueryHandler(show_edit_menu, pattern=r"^upload_edit$"),
+            CallbackQueryHandler(edit_selection_callback, pattern=r"^upload_edit_"),
+            CallbackQueryHandler(edit_selection_callback, pattern=r"^upload_back_preview$"),
+            CallbackQueryHandler(upload_cancel_callback, pattern=r"^upload_cancel$"),
+        ],
+    },
+    fallbacks=[
+        CommandHandler("cancel", upload_cancel_command),
+    ],
+    name="upload_conversation",
+    persistent=False,
+    conversation_timeout=300,
+)
+
+upload_rarity_callback_handler = CallbackQueryHandler(
+    lambda u, c: None,
+    pattern=r"^upload_rarity_"
+)
+
+quick_upload_handler = CommandHandler("quickupload", quick_upload)
