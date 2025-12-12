@@ -73,6 +73,9 @@ from commands.inline_search import (
     register_inline_callback_handlers,
 )
 
+# Import role handlers
+from handlers.roles import register_role_handlers
+
 # Import Part 4 handlers
 from commands.collection import register_collection_handlers
 from commands.cardinfo import register_cardinfo_handlers
