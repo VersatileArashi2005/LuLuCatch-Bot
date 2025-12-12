@@ -29,7 +29,9 @@ from utils.logger import app_logger, error_logger, log_database
 # ============================================================
 
 class Database:
-    """Async database manager using asyncpg connection pool."""
+    """
+    Async database manager using asyncpg connection pool.
+    """
     
     _pool: Optional[Pool] = None
     _instance: Optional["Database"] = None
@@ -51,10 +53,13 @@ class Database:
     
     def _parse_database_url(self) -> dict:
         url = Config.DATABASE_URL
+        
         if url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql://", 1)
+        
         parsed = urlparse(url)
         query_params = parse_qs(parsed.query)
+        
         return {
             "host": parsed.hostname,
             "port": parsed.port or 5432,
@@ -70,10 +75,14 @@ class Database:
             return True
         
         if not Config.DATABASE_URL or Config.DATABASE_URL == "postgresql://user:password@localhost:5432/cardbot":
-            error_logger.warning("⚠️ DATABASE_URL not configured!")
+            error_logger.warning(
+                "⚠️ DATABASE_URL not configured! "
+                "Please add a PostgreSQL database on Railway."
+            )
             return False
         
         db_params = self._parse_database_url()
+        
         log_database(f"Connecting to database at {db_params['host']}:{db_params['port']}...")
         
         ssl_context = None
@@ -90,6 +99,7 @@ class Database:
         for attempt in range(1, max_retries + 1):
             try:
                 log_database(f"Connection attempt {attempt}/{max_retries}...")
+                
                 self._pool = await asyncpg.create_pool(
                     dsn=dsn,
                     min_size=Config.DB_MIN_CONNECTIONS,
@@ -97,26 +107,43 @@ class Database:
                     command_timeout=60,
                     ssl=ssl_context,
                 )
+                
                 async with self._pool.acquire() as conn:
                     await conn.execute("SELECT 1")
-                log_database(f"✅ Database connected!")
+                
+                log_database(
+                    f"✅ Database connected! "
+                    f"(pool: {Config.DB_MIN_CONNECTIONS}-{Config.DB_MAX_CONNECTIONS})"
+                )
                 return True
+                
             except asyncpg.InvalidPasswordError as e:
                 error_logger.error(f"❌ Database authentication failed: {e}")
                 return False
+                
             except asyncpg.InvalidCatalogNameError as e:
                 error_logger.error(f"❌ Database does not exist: {e}")
                 return False
+                
             except Exception as e:
-                error_logger.error(f"Connection attempt {attempt} failed: {e}")
+                error_logger.error(
+                    f"Connection attempt {attempt} failed: {type(e).__name__}: {e}"
+                )
+                
                 if attempt < max_retries:
+                    log_database(f"Retrying in {retry_delay} seconds...")
                     await asyncio.sleep(retry_delay)
                 else:
+                    error_logger.error(
+                        f"❌ Failed to connect after {max_retries} attempts."
+                    )
                     return False
+        
         return False
     
     async def disconnect(self) -> None:
         if self._pool is not None:
+            log_database("Closing database pool...")
             await self._pool.close()
             self._pool = None
             log_database("✅ Database pool closed")
@@ -169,7 +196,9 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
     log_database("Initializing database schema...")
     
     try:
-        # Users Table
+        # ========================================
+        # 1. Create Users Table
+        # ========================================
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -192,14 +221,20 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
             )
         """)
         
+        # Add role column if not exists (for existing databases)
         try:
-            await db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT NULL")
+            await db.execute("""
+                ALTER TABLE users 
+                ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT NULL
+            """)
         except Exception:
             pass
         
         log_database("✅ Users table ready")
         
-        # Cards Table
+        # ========================================
+        # 2. Create Cards Table
+        # ========================================
         await db.execute("""
             CREATE TABLE IF NOT EXISTS cards (
                 card_id SERIAL PRIMARY KEY,
@@ -217,7 +252,9 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
         """)
         log_database("✅ Cards table ready")
         
-        # Collections Table
+        # ========================================
+        # 3. Create Collections Table
+        # ========================================
         await db.execute("""
             CREATE TABLE IF NOT EXISTS collections (
                 collection_id SERIAL PRIMARY KEY,
@@ -232,7 +269,9 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
         """)
         log_database("✅ Collections table ready")
         
-        # Groups Table
+        # ========================================
+        # 4. Create Groups Table
+        # ========================================
         await db.execute("""
             CREATE TABLE IF NOT EXISTS groups (
                 group_id BIGINT PRIMARY KEY,
@@ -251,7 +290,9 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
         """)
         log_database("✅ Groups table ready")
         
-        # Trades Table
+        # ========================================
+        # 5. Create Trades Table
+        # ========================================
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trades (
                 id SERIAL PRIMARY KEY,
@@ -261,12 +302,16 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
                 requested_card_id INTEGER,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                CONSTRAINT valid_status CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed', 'failed')),
+                CONSTRAINT no_self_trade CHECK (from_user != to_user)
             )
         """)
         log_database("✅ Trades table ready")
         
-        # Stats Table
+        # ========================================
+        # 6. Create Stats Table
+        # ========================================
         await db.execute("""
             CREATE TABLE IF NOT EXISTS stats (
                 id SERIAL PRIMARY KEY,
@@ -277,28 +322,142 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
         """)
         log_database("✅ Stats table ready")
         
-        # Constraints
+        # ========================================
+        # 7. Add Constraints
+        # ========================================
+        
         try:
-            await db.execute("ALTER TABLE cards ADD CONSTRAINT cards_anime_character_unique UNIQUE (anime, character_name)")
+            await db.execute("""
+                ALTER TABLE cards 
+                ADD CONSTRAINT cards_anime_character_unique 
+                UNIQUE (anime, character_name)
+            """)
         except (DuplicateTableError, DuplicateObjectError, PostgresError):
             pass
         
         try:
-            await db.execute("ALTER TABLE collections ADD CONSTRAINT collections_user_card_unique UNIQUE (user_id, card_id)")
+            await db.execute("""
+                ALTER TABLE collections 
+                ADD CONSTRAINT collections_user_card_unique 
+                UNIQUE (user_id, card_id)
+            """)
+        except (DuplicateTableError, DuplicateObjectError, PostgresError):
+            pass
+        
+        try:
+            await db.execute("""
+                ALTER TABLE collections 
+                ADD CONSTRAINT fk_collections_user 
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            """)
+        except (DuplicateTableError, DuplicateObjectError, PostgresError):
+            pass
+        
+        try:
+            await db.execute("""
+                ALTER TABLE collections 
+                ADD CONSTRAINT fk_collections_card 
+                FOREIGN KEY (card_id) REFERENCES cards(card_id) ON DELETE CASCADE
+            """)
+        except (DuplicateTableError, DuplicateObjectError, PostgresError):
+            pass
+        
+        try:
+            await db.execute("""
+                ALTER TABLE trades 
+                ADD CONSTRAINT fk_trades_from_user 
+                FOREIGN KEY (from_user) REFERENCES users(user_id) ON DELETE CASCADE
+            """)
+        except (DuplicateTableError, DuplicateObjectError, PostgresError):
+            pass
+        
+        try:
+            await db.execute("""
+                ALTER TABLE trades 
+                ADD CONSTRAINT fk_trades_to_user 
+                FOREIGN KEY (to_user) REFERENCES users(user_id) ON DELETE CASCADE
+            """)
+        except (DuplicateTableError, DuplicateObjectError, PostgresError):
+            pass
+        
+        try:
+            await db.execute("""
+                ALTER TABLE trades 
+                ADD CONSTRAINT fk_trades_offered_card 
+                FOREIGN KEY (offered_card_id) REFERENCES cards(card_id) ON DELETE CASCADE
+            """)
+        except (DuplicateTableError, DuplicateObjectError, PostgresError):
+            pass
+        
+        try:
+            await db.execute("""
+                ALTER TABLE trades 
+                ADD CONSTRAINT fk_trades_requested_card 
+                FOREIGN KEY (requested_card_id) REFERENCES cards(card_id) ON DELETE SET NULL
+            """)
         except (DuplicateTableError, DuplicateObjectError, PostgresError):
             pass
         
         log_database("✅ Constraints ready")
         
-        # Indexes
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_collections_user_id ON collections(user_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_collections_card_id ON collections(card_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(rarity)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_cards_anime ON cards(anime)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role) WHERE role IS NOT NULL")
+        # ========================================
+        # 8. Create Indexes
+        # ========================================
+        
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_collections_user_id 
+            ON collections(user_id)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_collections_card_id 
+            ON collections(card_id)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_cards_rarity 
+            ON cards(rarity)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_cards_anime 
+            ON cards(anime)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_cards_active 
+            ON cards(is_active) WHERE is_active = TRUE
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_groups_active 
+            ON groups(is_active) WHERE is_active = TRUE
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_users_banned 
+            ON users(is_banned) WHERE is_banned = FALSE
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_users_role 
+            ON users(role) WHERE role IS NOT NULL
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_trades_to_user 
+            ON trades(to_user)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_trades_from_user 
+            ON trades(from_user)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_trades_status 
+            ON trades(status)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_trades_pending 
+            ON trades(to_user, status) WHERE status = 'pending'
+        """)
+        
         log_database("✅ Indexes ready")
         
-        # Default Stats
+        # ========================================
+        # 9. Insert Default Stats
+        # ========================================
         await db.execute("""
             INSERT INTO stats (key, value) VALUES
                 ('total_trades', 0),
@@ -306,6 +465,7 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
                 ('total_spawns_today', 0)
             ON CONFLICT (key) DO NOTHING
         """)
+        log_database("✅ Default stats inserted")
         
         log_database("✅ Database schema initialized successfully")
         return True
@@ -328,6 +488,7 @@ async def ensure_user(
 ) -> Optional[Record]:
     if not db.is_connected:
         return None
+    
     query = """
         INSERT INTO users (user_id, username, first_name, last_name)
         VALUES ($1, $2, $3, $4)
@@ -341,10 +502,15 @@ async def ensure_user(
     return await db.fetchrow(query, user_id, username, first_name, last_name)
 
 
-async def get_user_by_id(pool: Optional[Pool], user_id: int) -> Optional[Record]:
+async def get_user_by_id(
+    pool: Optional[Pool],
+    user_id: int
+) -> Optional[Record]:
     if not db.is_connected:
         return None
-    return await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+    
+    query = "SELECT * FROM users WHERE user_id = $1"
+    return await db.fetchrow(query, user_id)
 
 
 async def update_user_stats(
@@ -356,6 +522,7 @@ async def update_user_stats(
 ) -> Optional[Record]:
     if not db.is_connected:
         return None
+    
     query = """
         UPDATE users SET
             coins = coins + $2,
@@ -368,16 +535,24 @@ async def update_user_stats(
     return await db.fetchrow(query, user_id, coins_delta, xp_delta, catches_delta)
 
 
-async def get_user_leaderboard(pool: Optional[Pool], limit: int = 10, order_by: str = "total_catches") -> List[Record]:
+async def get_user_leaderboard(
+    pool: Optional[Pool],
+    limit: int = 10,
+    order_by: str = "total_catches"
+) -> List[Record]:
     if not db.is_connected:
         return []
+    
     valid_columns = {"total_catches", "coins", "xp", "level"}
     if order_by not in valid_columns:
         order_by = "total_catches"
+    
     query = f"""
         SELECT user_id, username, first_name, {order_by}, level
-        FROM users WHERE is_banned = FALSE
-        ORDER BY {order_by} DESC LIMIT $1
+        FROM users
+        WHERE is_banned = FALSE
+        ORDER BY {order_by} DESC
+        LIMIT $1
     """
     return await db.fetch(query, limit)
 
@@ -385,7 +560,9 @@ async def get_user_leaderboard(pool: Optional[Pool], limit: int = 10, order_by: 
 async def get_all_users(pool: Optional[Pool]) -> List[Record]:
     if not db.is_connected:
         return []
-    return await db.fetch("SELECT * FROM users WHERE is_banned = FALSE")
+    
+    query = "SELECT * FROM users WHERE is_banned = FALSE"
+    return await db.fetch(query)
 
 
 # ============================================================
@@ -404,59 +581,123 @@ async def add_card(
 ) -> Optional[Record]:
     if not db.is_connected:
         return None
+
     if not 1 <= rarity <= 11:
-        raise ValueError(f"Invalid rarity: {rarity}")
+        raise ValueError(f"Invalid rarity: {rarity}. Must be between 1 and 11.")
+
     query = """
         INSERT INTO cards (anime, character_name, rarity, photo_file_id, uploader_id, description, tags)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (anime, character_name) DO NOTHING
         RETURNING *
     """
-    return await db.fetchrow(query, anime, character, rarity, photo_file_id, uploader_id, description, tags or [])
+    return await db.fetchrow(
+        query, anime, character, rarity, photo_file_id, uploader_id, description, tags or []
+    )
 
 
-async def get_card_by_id(pool: Optional[Pool], card_id: int) -> Optional[Record]:
+async def get_card_by_id(
+    pool: Optional[Pool],
+    card_id: int
+) -> Optional[Record]:
     if not db.is_connected:
         return None
-    return await db.fetchrow("SELECT * FROM cards WHERE card_id = $1 AND is_active = TRUE", card_id)
+
+    query = "SELECT * FROM cards WHERE card_id = $1 AND is_active = TRUE"
+    return await db.fetchrow(query, card_id)
 
 
-async def get_random_card(pool: Optional[Pool], rarity: Optional[int] = None) -> Optional[Record]:
+async def get_cards_by_ids(
+    pool: Optional[Pool],
+    card_ids: List[int]
+) -> List[Record]:
+    if not db.is_connected or not card_ids:
+        return []
+
+    query = """
+        SELECT * FROM cards 
+        WHERE card_id = ANY($1) AND is_active = TRUE
+        ORDER BY rarity DESC, character_name
+    """
+    return await db.fetch(query, card_ids)
+
+
+async def get_random_card(
+    pool: Optional[Pool],
+    rarity: Optional[int] = None
+) -> Optional[Record]:
     if not db.is_connected:
         return None
+
     if rarity:
-        return await db.fetchrow("SELECT * FROM cards WHERE is_active = TRUE AND rarity = $1 ORDER BY RANDOM() LIMIT 1", rarity)
-    return await db.fetchrow("SELECT * FROM cards WHERE is_active = TRUE ORDER BY RANDOM() LIMIT 1")
+        query = """
+            SELECT * FROM cards 
+            WHERE is_active = TRUE AND rarity = $1
+            ORDER BY RANDOM() 
+            LIMIT 1
+        """
+        return await db.fetchrow(query, rarity)
+    else:
+        query = """
+            SELECT * FROM cards 
+            WHERE is_active = TRUE
+            ORDER BY RANDOM() 
+            LIMIT 1
+        """
+        return await db.fetchrow(query)
 
 
-async def search_cards(pool: Optional[Pool], search_term: str, limit: int = 20) -> List[Record]:
+async def search_cards(
+    pool: Optional[Pool],
+    search_term: str,
+    limit: int = 20
+) -> List[Record]:
     if not db.is_connected:
         return []
+
     query = """
         SELECT * FROM cards
-        WHERE is_active = TRUE AND (anime ILIKE $1 OR character_name ILIKE $1)
-        ORDER BY rarity DESC, character_name LIMIT $2
+        WHERE is_active = TRUE
+          AND (
+            anime ILIKE $1 
+            OR character_name ILIKE $1
+          )
+        ORDER BY rarity DESC, character_name
+        LIMIT $2
     """
-    return await db.fetch(query, f"%{search_term}%", limit)
+    search_pattern = f"%{search_term}%"
+    return await db.fetch(query, search_pattern, limit)
 
 
 async def get_card_count(pool: Optional[Pool]) -> int:
     if not db.is_connected:
         return 0
-    result = await db.fetchval("SELECT COUNT(*) FROM cards WHERE is_active = TRUE")
+
+    query = "SELECT COUNT(*) FROM cards WHERE is_active = TRUE"
+    result = await db.fetchval(query)
     return result or 0
 
 
-async def increment_card_caught(pool: Optional[Pool], card_id: int) -> None:
+async def increment_card_caught(
+    pool: Optional[Pool],
+    card_id: int
+) -> None:
     if not db.is_connected:
         return
-    await db.execute("UPDATE cards SET total_caught = total_caught + 1 WHERE card_id = $1", card_id)
+
+    query = "UPDATE cards SET total_caught = total_caught + 1 WHERE card_id = $1"
+    await db.execute(query, card_id)
 
 
-async def delete_card(pool: Optional[Pool], card_id: int) -> bool:
+async def delete_card(
+    pool: Optional[Pool],
+    card_id: int
+) -> bool:
     if not db.is_connected:
         return False
-    result = await db.fetchrow("UPDATE cards SET is_active = FALSE WHERE card_id = $1 RETURNING card_id", card_id)
+
+    query = "UPDATE cards SET is_active = FALSE WHERE card_id = $1 RETURNING card_id"
+    result = await db.fetchrow(query, card_id)
     return result is not None
 
 
@@ -464,9 +705,15 @@ async def delete_card(pool: Optional[Pool], card_id: int) -> bool:
 # 📦 Collection Operations
 # ============================================================
 
-async def add_to_collection(pool: Optional[Pool], user_id: int, card_id: int, group_id: Optional[int] = None) -> Optional[Record]:
+async def add_to_collection(
+    pool: Optional[Pool],
+    user_id: int,
+    card_id: int,
+    group_id: Optional[int] = None
+) -> Optional[Record]:
     if not db.is_connected:
         return None
+
     query = """
         INSERT INTO collections (user_id, card_id, caught_in_group)
         VALUES ($1, $2, $3)
@@ -478,42 +725,81 @@ async def add_to_collection(pool: Optional[Pool], user_id: int, card_id: int, gr
     return await db.fetchrow(query, user_id, card_id, group_id)
 
 
-async def get_user_collection(pool: Optional[Pool], user_id: int, page: int = 1, per_page: int = 10, rarity_filter: Optional[int] = None) -> tuple:
+async def get_user_collection(
+    pool: Optional[Pool],
+    user_id: int,
+    page: int = 1,
+    per_page: int = 10,
+    rarity_filter: Optional[int] = None
+) -> tuple[List[Record], int]:
     if not db.is_connected:
         return [], 0
+
     offset = (page - 1) * per_page
+
     if rarity_filter:
-        count = await db.fetchval("SELECT COUNT(*) FROM collections c JOIN cards ca ON c.card_id = ca.card_id WHERE c.user_id = $1 AND ca.rarity = $2 AND ca.is_active = TRUE", user_id, rarity_filter)
-        cards = await db.fetch("""
-            SELECT c.*, ca.anime, ca.character_name, ca.rarity, ca.photo_file_id
-            FROM collections c JOIN cards ca ON c.card_id = ca.card_id
+        count_query = """
+            SELECT COUNT(*) FROM collections c
+            JOIN cards ca ON c.card_id = ca.card_id
+            WHERE c.user_id = $1 AND ca.rarity = $2 AND ca.is_active = TRUE
+        """
+        main_query = """
+            SELECT c.*, ca.anime, ca.character_name, ca.rarity, 
+                   ca.photo_file_id, ca.description
+            FROM collections c
+            JOIN cards ca ON c.card_id = ca.card_id
             WHERE c.user_id = $1 AND ca.rarity = $4 AND ca.is_active = TRUE
-            ORDER BY ca.rarity DESC LIMIT $2 OFFSET $3
-        """, user_id, per_page, offset, rarity_filter)
+            ORDER BY ca.rarity DESC, ca.character_name
+            LIMIT $2 OFFSET $3
+        """
+        total = await db.fetchval(count_query, user_id, rarity_filter)
+        cards = await db.fetch(main_query, user_id, per_page, offset, rarity_filter)
     else:
-        count = await db.fetchval("SELECT COUNT(*) FROM collections c JOIN cards ca ON c.card_id = ca.card_id WHERE c.user_id = $1 AND ca.is_active = TRUE", user_id)
-        cards = await db.fetch("""
-            SELECT c.*, ca.anime, ca.character_name, ca.rarity, ca.photo_file_id
-            FROM collections c JOIN cards ca ON c.card_id = ca.card_id
+        count_query = """
+            SELECT COUNT(*) FROM collections c
+            JOIN cards ca ON c.card_id = ca.card_id
             WHERE c.user_id = $1 AND ca.is_active = TRUE
-            ORDER BY ca.rarity DESC LIMIT $2 OFFSET $3
-        """, user_id, per_page, offset)
-    return cards, count or 0
+        """
+        main_query = """
+            SELECT c.*, ca.anime, ca.character_name, ca.rarity, 
+                   ca.photo_file_id, ca.description
+            FROM collections c
+            JOIN cards ca ON c.card_id = ca.card_id
+            WHERE c.user_id = $1 AND ca.is_active = TRUE
+            ORDER BY ca.rarity DESC, ca.character_name
+            LIMIT $2 OFFSET $3
+        """
+        total = await db.fetchval(count_query, user_id)
+        cards = await db.fetch(main_query, user_id, per_page, offset)
+
+    return cards, total or 0
 
 
-async def get_user_collection_stats(pool: Optional[Pool], user_id: int) -> dict:
+async def get_user_collection_stats(
+    pool: Optional[Pool],
+    user_id: int
+) -> dict:
     if not db.is_connected:
-        return {"total_unique": 0, "total_cards": 0, "mythical_plus": 0, "legendary_count": 0}
+        return {
+            "total_unique": 0,
+            "total_cards": 0,
+            "mythical_plus": 0,
+            "legendary_count": 0,
+        }
+
     query = """
         SELECT 
             COUNT(*) as total_unique,
             COALESCE(SUM(c.quantity), 0) as total_cards,
             COUNT(*) FILTER (WHERE ca.rarity >= 9) as mythical_plus,
             COUNT(*) FILTER (WHERE ca.rarity = 11) as legendary_count
-        FROM collections c JOIN cards ca ON c.card_id = ca.card_id
+        FROM collections c
+        JOIN cards ca ON c.card_id = ca.card_id
         WHERE c.user_id = $1 AND ca.is_active = TRUE
     """
+
     row = await db.fetchrow(query, user_id)
+
     if row:
         return {
             "total_unique": row["total_unique"] or 0,
@@ -521,22 +807,60 @@ async def get_user_collection_stats(pool: Optional[Pool], user_id: int) -> dict:
             "mythical_plus": row["mythical_plus"] or 0,
             "legendary_count": row["legendary_count"] or 0,
         }
-    return {"total_unique": 0, "total_cards": 0, "mythical_plus": 0, "legendary_count": 0}
+    return {
+        "total_unique": 0,
+        "total_cards": 0,
+        "mythical_plus": 0,
+        "legendary_count": 0,
+    }
 
 
-async def check_user_has_card(pool: Optional[Pool], user_id: int, card_id: int) -> bool:
+async def check_user_has_card(
+    pool: Optional[Pool],
+    user_id: int,
+    card_id: int
+) -> bool:
     if not db.is_connected:
         return False
-    return await db.fetchval("SELECT EXISTS(SELECT 1 FROM collections WHERE user_id = $1 AND card_id = $2)", user_id, card_id)
+
+    query = """
+        SELECT EXISTS(
+            SELECT 1 FROM collections 
+            WHERE user_id = $1 AND card_id = $2
+        )
+    """
+    return await db.fetchval(query, user_id, card_id)
+
+
+async def toggle_favorite(
+    pool: Optional[Pool],
+    user_id: int,
+    card_id: int
+) -> Optional[bool]:
+    if not db.is_connected:
+        return None
+
+    query = """
+        UPDATE collections 
+        SET is_favorite = NOT is_favorite
+        WHERE user_id = $1 AND card_id = $2
+        RETURNING is_favorite
+    """
+    return await db.fetchval(query, user_id, card_id)
 
 
 # ============================================================
 # 👥 Group Operations
 # ============================================================
 
-async def ensure_group(pool: Optional[Pool], group_id: int, group_name: Optional[str] = None) -> Optional[Record]:
+async def ensure_group(
+    pool: Optional[Pool],
+    group_id: int,
+    group_name: Optional[str] = None
+) -> Optional[Record]:
     if not db.is_connected:
         return None
+
     query = """
         INSERT INTO groups (group_id, group_name)
         VALUES ($1, $2)
@@ -548,114 +872,902 @@ async def ensure_group(pool: Optional[Pool], group_id: int, group_name: Optional
     return await db.fetchrow(query, group_id, group_name)
 
 
-async def get_group_by_id(pool: Optional[Pool], group_id: int) -> Optional[Record]:
-    if not db.is_connected:
-        return None
-    return await db.fetchrow("SELECT * FROM groups WHERE group_id = $1", group_id)
-
-
-async def get_all_groups(pool: Optional[Pool], active_only: bool = True) -> List[Record]:
+async def get_all_groups(
+    pool: Optional[Pool],
+    active_only: bool = True
+) -> List[Record]:
     if not db.is_connected:
         return []
+
     if active_only:
-        return await db.fetch("SELECT * FROM groups WHERE is_active = TRUE ORDER BY joined_at")
-    return await db.fetch("SELECT * FROM groups ORDER BY joined_at")
+        query = "SELECT * FROM groups WHERE is_active = TRUE ORDER BY joined_at"
+    else:
+        query = "SELECT * FROM groups ORDER BY joined_at"
+
+    return await db.fetch(query)
 
 
-async def update_group_spawn(pool: Optional[Pool], group_id: int, card_id: int, message_id: int) -> None:
+async def get_group_by_id(
+    pool: Optional[Pool],
+    group_id: int
+) -> Optional[Record]:
+    if not db.is_connected:
+        return None
+
+    query = "SELECT * FROM groups WHERE group_id = $1"
+    return await db.fetchrow(query, group_id)
+
+
+async def update_group_spawn(
+    pool: Optional[Pool],
+    group_id: int,
+    card_id: int,
+    message_id: int
+) -> None:
     if not db.is_connected:
         return
-    await db.execute("""
-        UPDATE groups SET current_card_id = $2, current_card_message_id = $3,
-        last_spawn = NOW(), total_spawns = total_spawns + 1 WHERE group_id = $1
-    """, group_id, card_id, message_id)
+
+    query = """
+        UPDATE groups SET
+            current_card_id = $2,
+            current_card_message_id = $3,
+            last_spawn = NOW(),
+            total_spawns = total_spawns + 1
+        WHERE group_id = $1
+    """
+    await db.execute(query, group_id, card_id, message_id)
 
 
-async def clear_group_spawn(pool: Optional[Pool], group_id: int) -> None:
+async def clear_group_spawn(
+    pool: Optional[Pool],
+    group_id: int
+) -> None:
     if not db.is_connected:
         return
-    await db.execute("""
-        UPDATE groups SET current_card_id = NULL, current_card_message_id = NULL,
-        total_catches = total_catches + 1 WHERE group_id = $1
-    """, group_id)
+
+    query = """
+        UPDATE groups SET
+            current_card_id = NULL,
+            current_card_message_id = NULL,
+            total_catches = total_catches + 1
+        WHERE group_id = $1
+    """
+    await db.execute(query, group_id)
+
+
+async def update_group_settings(
+    pool: Optional[Pool],
+    group_id: int,
+    spawn_enabled: Optional[bool] = None,
+    cooldown_seconds: Optional[int] = None
+) -> Optional[Record]:
+    if not db.is_connected:
+        return None
+
+    updates = []
+    values = [group_id]
+    param_count = 1
+
+    if spawn_enabled is not None:
+        param_count += 1
+        updates.append(f"spawn_enabled = ${param_count}")
+        values.append(spawn_enabled)
+
+    if cooldown_seconds is not None:
+        param_count += 1
+        updates.append(f"cooldown_seconds = ${param_count}")
+        values.append(cooldown_seconds)
+
+    if not updates:
+        return await get_group_by_id(pool, group_id)
+
+    query = f"""
+        UPDATE groups SET {', '.join(updates)}
+        WHERE group_id = $1
+        RETURNING *
+    """
+    return await db.fetchrow(query, *values)
+
+
+async def deactivate_group(
+    pool: Optional[Pool],
+    group_id: int
+) -> None:
+    if not db.is_connected:
+        return
+
+    query = "UPDATE groups SET is_active = FALSE WHERE group_id = $1"
+    await db.execute(query, group_id)
 
 
 # ============================================================
-# 📊 Statistics
+# 📊 Statistics & Analytics
 # ============================================================
 
 async def get_global_stats(pool: Optional[Pool]) -> dict:
     if not db.is_connected:
-        return {"total_users": 0, "total_cards": 0, "total_catches": 0, "active_groups": 0}
-    try:
         return {
-            "total_users": await db.fetchval("SELECT COUNT(*) FROM users") or 0,
-            "total_cards": await db.fetchval("SELECT COUNT(*) FROM cards WHERE is_active = TRUE") or 0,
-            "total_catches": int(await db.fetchval("SELECT COALESCE(SUM(total_catches), 0) FROM users") or 0),
-            "active_groups": await db.fetchval("SELECT COUNT(*) FROM groups WHERE is_active = TRUE") or 0,
+            "total_users": 0,
+            "total_cards": 0,
+            "total_catches": 0,
+            "active_groups": 0,
         }
+
+    try:
+        stats = {}
+
+        stats["total_users"] = await db.fetchval(
+            "SELECT COUNT(*) FROM users"
+        ) or 0
+
+        stats["total_cards"] = await db.fetchval(
+            "SELECT COUNT(*) FROM cards WHERE is_active = TRUE"
+        ) or 0
+
+        stats["total_catches"] = int(await db.fetchval(
+            "SELECT COALESCE(SUM(total_catches), 0) FROM users"
+        ) or 0)
+
+        stats["active_groups"] = await db.fetchval(
+            "SELECT COUNT(*) FROM groups WHERE is_active = TRUE"
+        ) or 0
+
+        return stats
+
     except Exception as e:
         error_logger.error(f"Error getting global stats: {e}")
-        return {"total_users": 0, "total_cards": 0, "total_catches": 0, "active_groups": 0}
+        return {
+            "total_users": 0,
+            "total_cards": 0,
+            "total_catches": 0,
+            "active_groups": 0,
+        }
+
+
+async def get_rarity_distribution(pool: Optional[Pool]) -> List[Record]:
+    if not db.is_connected:
+        return []
+
+    query = """
+        SELECT rarity, COUNT(*) as count
+        FROM cards
+        WHERE is_active = TRUE
+        GROUP BY rarity
+        ORDER BY rarity
+    """
+    return await db.fetch(query)
+
+
+async def get_top_catchers(
+    pool: Optional[Pool],
+    limit: int = 10
+) -> List[Record]:
+    if not db.is_connected:
+        return []
+
+    query = """
+        SELECT user_id, username, first_name, total_catches, level, coins
+        FROM users
+        WHERE is_banned = FALSE AND total_catches > 0
+        ORDER BY total_catches DESC
+        LIMIT $1
+    """
+    return await db.fetch(query, limit)
+
+
+async def get_rarest_cards(
+    pool: Optional[Pool],
+    limit: int = 10
+) -> List[Record]:
+    if not db.is_connected:
+        return []
+
+    query = """
+        SELECT * FROM cards
+        WHERE is_active = TRUE
+        ORDER BY rarity DESC, total_caught ASC
+        LIMIT $1
+    """
+    return await db.fetch(query, limit)
+
+
+# ============================================================
+# 🛠️ Maintenance Functions
+# ============================================================
+
+async def cleanup_inactive_groups(
+    pool: Optional[Pool],
+    days_inactive: int = 30
+) -> int:
+    if not db.is_connected:
+        return 0
+
+    query = f"""
+        UPDATE groups SET is_active = FALSE
+        WHERE last_spawn < NOW() - INTERVAL '{days_inactive} days'
+          AND is_active = TRUE
+        RETURNING group_id
+    """
+    result = await db.fetch(query)
+    return len(result)
 
 
 async def health_check(pool: Optional[Pool]) -> bool:
     if not db.is_connected:
         return False
+
     try:
         await db.fetchval("SELECT 1")
         return True
-    except Exception:
+    except Exception as e:
+        error_logger.error(f"Database health check failed: {e}")
         return False
+
+
+async def get_database_size(pool: Optional[Pool]) -> Optional[str]:
+    if not db.is_connected:
+        return None
+
+    try:
+        query = "SELECT pg_size_pretty(pg_database_size(current_database()))"
+        return await db.fetchval(query)
+    except Exception:
+        return None
+
+
+async def get_table_counts(pool: Optional[Pool]) -> dict:
+    if not db.is_connected:
+        return {}
+
+    try:
+        return {
+            "users": await db.fetchval("SELECT COUNT(*) FROM users") or 0,
+            "cards": await db.fetchval("SELECT COUNT(*) FROM cards") or 0,
+            "collections": await db.fetchval("SELECT COUNT(*) FROM collections") or 0,
+            "groups": await db.fetchval("SELECT COUNT(*) FROM groups") or 0,
+            "trades": await db.fetchval("SELECT COUNT(*) FROM trades") or 0,
+        }
+    except Exception:
+        return {}
+
+
+# ============================================================
+# 📦 Collection Functions (Enhanced)
+# ============================================================
+
+async def get_collection_cards(
+    pool: Optional[Pool],
+    user_id: int,
+    offset: int = 0,
+    limit: int = 10,
+    rarity_filter: Optional[int] = None
+) -> List[Record]:
+    if not db.is_connected:
+        return []
+
+    try:
+        if rarity_filter:
+            query = """
+                SELECT 
+                    c.collection_id,
+                    c.user_id,
+                    c.card_id,
+                    c.quantity,
+                    c.caught_at,
+                    c.is_favorite,
+                    ca.anime,
+                    ca.character_name,
+                    ca.rarity,
+                    ca.photo_file_id,
+                    ca.total_caught
+                FROM collections c
+                JOIN cards ca ON c.card_id = ca.card_id
+                WHERE c.user_id = $1 
+                  AND ca.is_active = TRUE 
+                  AND ca.rarity = $4
+                  AND c.quantity > 0
+                ORDER BY ca.rarity DESC, ca.character_name ASC
+                LIMIT $2 OFFSET $3
+            """
+            return await db.fetch(query, user_id, limit, offset, rarity_filter)
+        else:
+            query = """
+                SELECT 
+                    c.collection_id,
+                    c.user_id,
+                    c.card_id,
+                    c.quantity,
+                    c.caught_at,
+                    c.is_favorite,
+                    ca.anime,
+                    ca.character_name,
+                    ca.rarity,
+                    ca.photo_file_id,
+                    ca.total_caught
+                FROM collections c
+                JOIN cards ca ON c.card_id = ca.card_id
+                WHERE c.user_id = $1 
+                  AND ca.is_active = TRUE
+                  AND c.quantity > 0
+                ORDER BY ca.rarity DESC, ca.character_name ASC
+                LIMIT $2 OFFSET $3
+            """
+            return await db.fetch(query, user_id, limit, offset)
+    except Exception as e:
+        error_logger.error(f"Error getting collection cards: {e}", exc_info=True)
+        return []
+
+
+async def get_collection_count(
+    pool: Optional[Pool],
+    user_id: int,
+    rarity_filter: Optional[int] = None
+) -> int:
+    if not db.is_connected:
+        return 0
+
+    try:
+        if rarity_filter:
+            query = """
+                SELECT COUNT(*) FROM collections c
+                JOIN cards ca ON c.card_id = ca.card_id
+                WHERE c.user_id = $1 
+                  AND ca.is_active = TRUE 
+                  AND ca.rarity = $2
+                  AND c.quantity > 0
+            """
+            result = await db.fetchval(query, user_id, rarity_filter)
+        else:
+            query = """
+                SELECT COUNT(*) FROM collections c
+                JOIN cards ca ON c.card_id = ca.card_id
+                WHERE c.user_id = $1 
+                  AND ca.is_active = TRUE
+                  AND c.quantity > 0
+            """
+            result = await db.fetchval(query, user_id)
+
+        return result or 0
+    except Exception as e:
+        error_logger.error(f"Error getting collection count: {e}", exc_info=True)
+        return 0
+
+
+async def get_card_with_details(
+    pool: Optional[Pool],
+    card_id: int
+) -> Optional[Record]:
+    if not db.is_connected:
+        return None
+
+    try:
+        query = """
+            SELECT 
+                c.*,
+                (SELECT COUNT(DISTINCT user_id) FROM collections WHERE card_id = c.card_id AND quantity > 0) as unique_owners,
+                (SELECT COALESCE(SUM(quantity), 0) FROM collections WHERE card_id = c.card_id) as total_in_circulation
+            FROM cards c
+            WHERE c.card_id = $1 AND c.is_active = TRUE
+        """
+        return await db.fetchrow(query, card_id)
+    except Exception as e:
+        error_logger.error(f"Error getting card details: {e}", exc_info=True)
+        return None
+
+
+async def get_card_owners(
+    pool: Optional[Pool],
+    card_id: int,
+    limit: int = 5
+) -> List[Record]:
+    if not db.is_connected:
+        return []
+
+    try:
+        query = """
+            SELECT 
+                u.user_id, 
+                u.first_name, 
+                u.username, 
+                c.quantity,
+                c.caught_at,
+                c.is_favorite
+            FROM collections c
+            JOIN users u ON c.user_id = u.user_id
+            WHERE c.card_id = $1 AND c.quantity > 0
+            ORDER BY c.quantity DESC, c.caught_at ASC
+            LIMIT $2
+        """
+        return await db.fetch(query, card_id, limit)
+    except Exception as e:
+        error_logger.error(f"Error getting card owners: {e}", exc_info=True)
+        return []
+
+
+async def check_user_owns_card(
+    pool: Optional[Pool],
+    user_id: int,
+    card_id: int,
+    min_quantity: int = 1
+) -> bool:
+    if not db.is_connected:
+        return False
+
+    try:
+        query = """
+            SELECT quantity FROM collections
+            WHERE user_id = $1 AND card_id = $2
+        """
+        result = await db.fetchval(query, user_id, card_id)
+        return (result or 0) >= min_quantity
+    except Exception as e:
+        error_logger.error(f"Error checking card ownership: {e}", exc_info=True)
+        return False
+
+
+async def get_user_card_quantity(
+    pool: Optional[Pool],
+    user_id: int,
+    card_id: int
+) -> int:
+    if not db.is_connected:
+        return 0
+
+    try:
+        query = "SELECT quantity FROM collections WHERE user_id = $1 AND card_id = $2"
+        result = await db.fetchval(query, user_id, card_id)
+        return result or 0
+    except Exception as e:
+        error_logger.error(f"Error getting card quantity: {e}", exc_info=True)
+        return 0
+
+
+# ============================================================
+# 🔄 Trade Functions
+# ============================================================
+
+async def create_trade(
+    pool: Optional[Pool],
+    from_user: int,
+    to_user: int,
+    offered_card_id: int,
+    requested_card_id: Optional[int] = None
+) -> Optional[int]:
+    if not db.is_connected:
+        return None
+
+    if from_user == to_user:
+        return None
+
+    try:
+        query = """
+            INSERT INTO trades (from_user, to_user, offered_card_id, requested_card_id, status)
+            VALUES ($1, $2, $3, $4, 'pending')
+            RETURNING id
+        """
+        result = await db.fetchval(query, from_user, to_user, offered_card_id, requested_card_id)
+        return result
+    except Exception as e:
+        error_logger.error(f"Error creating trade: {e}", exc_info=True)
+        return None
+
+
+async def get_trade(
+    pool: Optional[Pool],
+    trade_id: int
+) -> Optional[Record]:
+    if not db.is_connected:
+        return None
+
+    try:
+        query = """
+            SELECT 
+                t.*,
+                fu.first_name as from_user_name,
+                fu.username as from_username,
+                tu.first_name as to_user_name,
+                tu.username as to_username,
+                oc.character_name as offered_character,
+                oc.anime as offered_anime,
+                oc.rarity as offered_rarity,
+                oc.photo_file_id as offered_photo,
+                rc.character_name as requested_character,
+                rc.anime as requested_anime,
+                rc.rarity as requested_rarity,
+                rc.photo_file_id as requested_photo
+            FROM trades t
+            JOIN users fu ON t.from_user = fu.user_id
+            JOIN users tu ON t.to_user = tu.user_id
+            JOIN cards oc ON t.offered_card_id = oc.card_id
+            LEFT JOIN cards rc ON t.requested_card_id = rc.card_id
+            WHERE t.id = $1
+        """
+        return await db.fetchrow(query, trade_id)
+    except Exception as e:
+        error_logger.error(f"Error getting trade: {e}", exc_info=True)
+        return None
+
+
+async def list_pending_trades_for_user(
+    pool: Optional[Pool],
+    user_id: int,
+    as_recipient: bool = True,
+    limit: int = 20
+) -> List[Record]:
+    if not db.is_connected:
+        return []
+
+    try:
+        if as_recipient:
+            query = """
+                SELECT 
+                    t.*,
+                    fu.first_name as from_user_name,
+                    fu.username as from_username,
+                    oc.character_name as offered_character,
+                    oc.anime as offered_anime,
+                    oc.rarity as offered_rarity,
+                    rc.character_name as requested_character,
+                    rc.anime as requested_anime,
+                    rc.rarity as requested_rarity
+                FROM trades t
+                JOIN users fu ON t.from_user = fu.user_id
+                JOIN cards oc ON t.offered_card_id = oc.card_id
+                LEFT JOIN cards rc ON t.requested_card_id = rc.card_id
+                WHERE t.to_user = $1 AND t.status = 'pending'
+                ORDER BY t.created_at DESC
+                LIMIT $2
+            """
+        else:
+            query = """
+                SELECT 
+                    t.*,
+                    tu.first_name as to_user_name,
+                    tu.username as to_username,
+                    oc.character_name as offered_character,
+                    oc.anime as offered_anime,
+                    oc.rarity as offered_rarity,
+                    rc.character_name as requested_character,
+                    rc.anime as requested_anime,
+                    rc.rarity as requested_rarity
+                FROM trades t
+                JOIN users tu ON t.to_user = tu.user_id
+                JOIN cards oc ON t.offered_card_id = oc.card_id
+                LEFT JOIN cards rc ON t.requested_card_id = rc.card_id
+                WHERE t.from_user = $1 AND t.status = 'pending'
+                ORDER BY t.created_at DESC
+                LIMIT $2
+            """
+        return await db.fetch(query, user_id, limit)
+    except Exception as e:
+        error_logger.error(f"Error listing pending trades: {e}", exc_info=True)
+        return []
+
+
+async def count_pending_trades(
+    pool: Optional[Pool],
+    user_id: int
+) -> int:
+    if not db.is_connected:
+        return 0
+
+    try:
+        query = """
+            SELECT COUNT(*) FROM trades
+            WHERE (from_user = $1 OR to_user = $1) AND status = 'pending'
+        """
+        result = await db.fetchval(query, user_id)
+        return result or 0
+    except Exception as e:
+        error_logger.error(f"Error counting pending trades: {e}", exc_info=True)
+        return 0
+
+
+async def update_trade_status(
+    pool: Optional[Pool],
+    trade_id: int,
+    status: str
+) -> bool:
+    if not db.is_connected:
+        return False
+
+    valid_statuses = {'pending', 'accepted', 'rejected', 'cancelled', 'completed', 'failed'}
+    if status not in valid_statuses:
+        return False
+
+    try:
+        query = """
+            UPDATE trades 
+            SET status = $2, updated_at = NOW()
+            WHERE id = $1
+            RETURNING id
+        """
+        result = await db.fetchval(query, trade_id, status)
+        return result is not None
+    except Exception as e:
+        error_logger.error(f"Error updating trade status: {e}", exc_info=True)
+        return False
+
+
+async def transfer_card_between_users(
+    pool: Optional[Pool],
+    from_user: int,
+    to_user: int,
+    card_id: int,
+    quantity: int = 1
+) -> tuple[bool, str]:
+    if not db.is_connected:
+        return False, "Database not connected"
+
+    if from_user == to_user:
+        return False, "Cannot transfer to yourself"
+
+    if quantity < 1:
+        return False, "Invalid quantity"
+
+    try:
+        async with db.pool.acquire() as conn:
+            async with conn.transaction():
+                sender_qty = await conn.fetchval(
+                    """
+                    SELECT quantity FROM collections
+                    WHERE user_id = $1 AND card_id = $2
+                    FOR UPDATE
+                    """,
+                    from_user, card_id
+                )
+
+                if sender_qty is None or sender_qty < quantity:
+                    return False, f"Insufficient cards (have: {sender_qty or 0}, need: {quantity})"
+
+                new_sender_qty = sender_qty - quantity
+
+                if new_sender_qty <= 0:
+                    await conn.execute(
+                        "DELETE FROM collections WHERE user_id = $1 AND card_id = $2",
+                        from_user, card_id
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE collections SET quantity = $3 WHERE user_id = $1 AND card_id = $2",
+                        from_user, card_id, new_sender_qty
+                    )
+
+                await conn.execute(
+                    """
+                    INSERT INTO collections (user_id, card_id, quantity, caught_at)
+                    VALUES ($1, $2, $3, NOW())
+                    ON CONFLICT (user_id, card_id) DO UPDATE
+                    SET quantity = collections.quantity + $3
+                    """,
+                    to_user, card_id, quantity
+                )
+
+                return True, "Transfer successful"
+
+    except Exception as e:
+        error_logger.error(f"Error transferring card: {e}", exc_info=True)
+        return False, f"Transfer failed: {str(e)}"
+
+
+async def execute_trade(
+    pool: Optional[Pool],
+    trade_id: int,
+    accepting_user_id: int
+) -> tuple[bool, str]:
+    if not db.is_connected:
+        return False, "Database not connected"
+
+    try:
+        trade = await get_trade(None, trade_id)
+
+        if not trade:
+            return False, "Trade not found"
+
+        if trade["status"] != "pending":
+            return False, f"Trade is no longer pending (status: {trade['status']})"
+
+        if trade["to_user"] != accepting_user_id:
+            return False, "Only the recipient can accept this trade"
+
+        from_user = trade["from_user"]
+        to_user = trade["to_user"]
+        offered_card_id = trade["offered_card_id"]
+        requested_card_id = trade.get("requested_card_id")
+
+        async with db.pool.acquire() as conn:
+            async with conn.transaction():
+                from_qty = await conn.fetchval(
+                    "SELECT quantity FROM collections WHERE user_id = $1 AND card_id = $2 FOR UPDATE",
+                    from_user, offered_card_id
+                )
+
+                if not from_qty or from_qty < 1:
+                    await update_trade_status(None, trade_id, "failed")
+                    return False, "Offerer no longer has the offered card"
+
+                if requested_card_id:
+                    to_qty = await conn.fetchval(
+                        "SELECT quantity FROM collections WHERE user_id = $1 AND card_id = $2 FOR UPDATE",
+                        to_user, requested_card_id
+                    )
+
+                    if not to_qty or to_qty < 1:
+                        await update_trade_status(None, trade_id, "failed")
+                        return False, "Recipient no longer has the requested card"
+
+                success1, msg1 = await transfer_card_between_users(
+                    None, from_user, to_user, offered_card_id, 1
+                )
+
+                if not success1:
+                    raise Exception(f"Failed to transfer offered card: {msg1}")
+
+                if requested_card_id:
+                    success2, msg2 = await transfer_card_between_users(
+                        None, to_user, from_user, requested_card_id, 1
+                    )
+
+                    if not success2:
+                        raise Exception(f"Failed to transfer requested card: {msg2}")
+
+                await update_trade_status(None, trade_id, "completed")
+
+                return True, "Trade completed successfully!"
+
+    except Exception as e:
+        error_logger.error(f"Error executing trade: {e}", exc_info=True)
+        await update_trade_status(None, trade_id, "failed")
+        return False, f"Trade execution failed: {str(e)}"
+
+
+# ============================================================
+# 🔍 Inline Search Functions
+# ============================================================
+
+async def get_unique_characters(
+    pool: Optional[Pool],
+    search_term: Optional[str] = None,
+    limit: int = 50
+) -> List[Record]:
+    if not db.is_connected:
+        return []
+
+    try:
+        if search_term:
+            query = """
+                SELECT DISTINCT character_name, anime, 
+                       MIN(card_id) as sample_card_id,
+                       COUNT(*) as card_count
+                FROM cards
+                WHERE is_active = TRUE
+                  AND (
+                    LOWER(character_name) LIKE LOWER($1)
+                    OR LOWER(anime) LIKE LOWER($1)
+                  )
+                GROUP BY character_name, anime
+                ORDER BY character_name ASC
+                LIMIT $2
+            """
+            return await db.fetch(query, f"%{search_term}%", limit)
+        else:
+            query = """
+                SELECT DISTINCT character_name, anime,
+                       MIN(card_id) as sample_card_id,
+                       COUNT(*) as card_count
+                FROM cards
+                WHERE is_active = TRUE
+                GROUP BY character_name, anime
+                ORDER BY character_name ASC
+                LIMIT $1
+            """
+            return await db.fetch(query, limit)
+    except Exception as e:
+        error_logger.error(f"Error getting unique characters: {e}")
+        return []
+
+
+async def get_cards_by_character(
+    pool: Optional[Pool],
+    character_name: str,
+    limit: int = 50
+) -> List[Record]:
+    if not db.is_connected:
+        return []
+
+    try:
+        query = """
+            SELECT * FROM cards
+            WHERE is_active = TRUE
+              AND LOWER(character_name) = LOWER($1)
+            ORDER BY rarity DESC
+            LIMIT $2
+        """
+        return await db.fetch(query, character_name, limit)
+    except Exception as e:
+        error_logger.error(f"Error getting cards by character: {e}")
+        return []
 
 
 # ============================================================
 # 👑 Role Management
 # ============================================================
 
-async def add_role(pool: Optional[Pool], user_id: int, role: str) -> bool:
+async def add_role(
+    pool: Optional[Pool],
+    user_id: int,
+    role: str
+) -> bool:
     if not db.is_connected:
         return False
+    
     valid_roles = {'admin', 'dev', 'uploader'}
     if role.lower() not in valid_roles:
         return False
+    
     try:
-        await db.execute("""
-            INSERT INTO users (user_id, role) VALUES ($1, $2)
-            ON CONFLICT (user_id) DO UPDATE SET role = $2, updated_at = NOW()
-        """, user_id, role.lower())
+        await db.execute(
+            """
+            INSERT INTO users (user_id, role)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET
+                role = $2,
+                updated_at = NOW()
+            """,
+            user_id, role.lower()
+        )
         return True
     except Exception as e:
         error_logger.error(f"Error adding role: {e}")
         return False
 
 
-async def remove_role(pool: Optional[Pool], user_id: int) -> bool:
+async def remove_role(
+    pool: Optional[Pool],
+    user_id: int
+) -> bool:
     if not db.is_connected:
         return False
+    
     try:
-        await db.execute("UPDATE users SET role = NULL, updated_at = NOW() WHERE user_id = $1", user_id)
+        await db.execute(
+            """
+            UPDATE users SET role = NULL, updated_at = NOW()
+            WHERE user_id = $1
+            """,
+            user_id
+        )
         return True
     except Exception as e:
         error_logger.error(f"Error removing role: {e}")
         return False
 
 
-async def get_user_role(pool: Optional[Pool], user_id: int) -> Optional[str]:
+async def get_user_role(
+    pool: Optional[Pool],
+    user_id: int
+) -> Optional[str]:
     if not db.is_connected:
         return None
+    
     try:
-        return await db.fetchval("SELECT role FROM users WHERE user_id = $1", user_id)
+        result = await db.fetchval(
+            "SELECT role FROM users WHERE user_id = $1",
+            user_id
+        )
+        return result
     except Exception as e:
         error_logger.error(f"Error getting role: {e}")
         return None
 
 
 async def check_is_owner(user_id: int) -> bool:
+    """Check if user is bot owner (from config)."""
     return user_id == Config.OWNER_ID
 
 
 async def check_is_admin(user_id: int) -> bool:
+    """Check if user is admin or higher."""
     if await check_is_owner(user_id):
         return True
     role = await get_user_role(None, user_id)
@@ -663,6 +1775,7 @@ async def check_is_admin(user_id: int) -> bool:
 
 
 async def check_is_dev(user_id: int) -> bool:
+    """Check if user is dev or higher."""
     if await check_is_owner(user_id):
         return True
     role = await get_user_role(None, user_id)
@@ -670,17 +1783,26 @@ async def check_is_dev(user_id: int) -> bool:
 
 
 async def check_is_uploader(user_id: int) -> bool:
+    """Check if user can upload cards."""
     if await check_is_owner(user_id):
         return True
     role = await get_user_role(None, user_id)
     return role in ('admin', 'dev', 'uploader')
 
 
-async def list_users_by_role(pool: Optional[Pool], role: str) -> List[Record]:
+async def list_users_by_role(
+    pool: Optional[Pool],
+    role: str
+) -> List[Record]:
+    """Get all users with a specific role."""
     if not db.is_connected:
         return []
+    
     try:
-        return await db.fetch("SELECT user_id, username, first_name, role FROM users WHERE role = $1", role.lower())
+        return await db.fetch(
+            "SELECT user_id, username, first_name, role FROM users WHERE role = $1",
+            role.lower()
+        )
     except Exception as e:
         error_logger.error(f"Error listing users by role: {e}")
         return []
