@@ -332,3 +332,201 @@ async def ensure_group_exists(
     except Exception as e:
         error_logger.error(f"Failed to ensure group exists: {e}")
         return False
+
+
+# ============================================================
+# 🎯 Name Matching System (Fuzzy Matching)
+# ============================================================
+
+def normalize_name(name: str) -> str:
+    """Normalize a name for comparison."""
+    # Convert to lowercase
+    name = name.lower().strip()
+    
+    # Remove common punctuation and extra spaces
+    name = re.sub(r'[^\w\s]', '', name)
+    name = re.sub(r'\s+', ' ', name)
+    
+    return name
+
+
+def calculate_similarity(name1: str, name2: str) -> float:
+    """Calculate similarity ratio between two names."""
+    norm1 = normalize_name(name1)
+    norm2 = normalize_name(name2)
+    
+    # Exact match
+    if norm1 == norm2:
+        return 1.0
+    
+    # Use SequenceMatcher for fuzzy matching
+    return SequenceMatcher(None, norm1, norm2).ratio()
+
+
+def check_name_match(guess: str, actual_name: str, threshold: float = 0.75) -> Tuple[bool, float]:
+    """
+    Check if a guessed name matches the actual name.
+    
+    Returns: (is_match, similarity_score)
+    """
+    guess = guess.strip()
+    actual = actual_name.strip()
+    
+    # Calculate full name similarity
+    full_similarity = calculate_similarity(guess, actual)
+    
+    if full_similarity >= threshold:
+        return True, full_similarity
+    
+    # Check if guess matches first name only
+    first_name = actual.split()[0] if actual else ""
+    first_similarity = calculate_similarity(guess, first_name)
+    
+    if first_similarity >= 0.85:  # Higher threshold for first name only
+        return True, first_similarity
+    
+    # Check if guess is contained in actual name
+    norm_guess = normalize_name(guess)
+    norm_actual = normalize_name(actual)
+    
+    if len(norm_guess) >= 3 and norm_guess in norm_actual:
+        return True, 0.80
+    
+    return False, max(full_similarity, first_similarity)
+
+
+# ============================================================
+# 🎨 Message Formatting Helpers
+# ============================================================
+
+def get_rarity_tier(rarity: int) -> str:
+    """Get the tier name for a rarity value."""
+    if rarity >= 10:
+        return "mythic"
+    elif rarity >= 8:
+        return "legendary"
+    elif rarity >= 6:
+        return "epic"
+    elif rarity >= 4:
+        return "rare"
+    else:
+        return "common"
+
+
+def get_catch_reaction(rarity: int) -> str:
+    """Get a random reaction emoji based on rarity."""
+    tier = get_rarity_tier(rarity)
+    reactions = CATCH_REACTIONS.get(tier, CATCH_REACTIONS["common"])
+    return random.choice(reactions)
+
+
+def format_group_name(name: Optional[str]) -> str:
+    """Format group name for display."""
+    if not name:
+        return "ᴛʜɪꜱ ɢʀᴏᴜᴘ"
+    
+    # Truncate if too long
+    if len(name) > 25:
+        name = name[:22] + "..."
+    
+    return name
+
+
+def create_drop_caption(rarity: int, group_name: str) -> str:
+    """Create the beautiful drop message caption."""
+    rarity_emoji = get_rarity_emoji(rarity)
+    rarity_name, _, _ = rarity_to_text(rarity)
+    styled_group = format_group_name(group_name)
+    
+    # Build the caption with iPhone-quality formatting
+    caption = (
+        f"{rarity_emoji} {TextStyle.sparkle()} "
+        f"{TextStyle.to_small_caps('a character has appeared')} "
+        f"{TextStyle.sparkle()} {rarity_emoji}\n\n"
+        
+        f"╭─────────────────────────╮\n"
+        f"│  {TextStyle.to_small_caps('in')} *{styled_group}*\n"
+        f"╰─────────────────────────╯\n\n"
+        
+        f"{TextStyle.heart()} {TextStyle.to_small_caps('capture them and give your')}\n"
+        f"    {TextStyle.to_small_caps('harem some aura with')}\n\n"
+        
+        f"    `/lulucatch <name>`\n\n"
+        
+        f"╭───── ⋆ ✦ ⋆ ─────╮\n"
+        f"│  ✨ *{rarity_name}* ✨\n"
+        f"╰───── ⋆ ✦ ⋆ ─────╯"
+    )
+    
+    return caption
+
+
+def create_catch_success_message(
+    user_name: str,
+    user_id: int,
+    character_name: str,
+    anime: str,
+    rarity: int,
+    is_new: bool = True
+) -> str:
+    """Create beautiful catch success message."""
+    rarity_emoji = get_rarity_emoji(rarity)
+    rarity_name, _, _ = rarity_to_text(rarity)
+    tier = get_rarity_tier(rarity)
+    
+    # Different sparkles based on rarity
+    if tier in ["legendary", "mythic"]:
+        border = "═" * 25
+        sparkle = "💎✨🌟"
+    elif tier == "epic":
+        border = "─" * 25
+        sparkle = "⭐✨"
+    else:
+        border = "─" * 25
+        sparkle = "✨"
+    
+    new_badge = "  🆕 *ɴᴇᴡ ᴄᴀʀᴅ!*" if is_new else ""
+    
+    message = (
+        f"{sparkle} *ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ ᴄᴀᴛᴄʜ!* {sparkle}\n"
+        f"╭{border}╮\n\n"
+        
+        f"   👤 [{user_name}](tg://user?id={user_id})\n"
+        f"   {TextStyle.to_small_caps('has captured')}\n\n"
+        
+        f"   🎴 *{character_name}*\n"
+        f"   📺 _{anime}_\n"
+        f"   {rarity_emoji} *{rarity_name}*{new_badge}\n\n"
+        
+        f"╰{border}╯\n\n"
+        
+        f"   {TextStyle.heart()} {TextStyle.to_small_caps('added to your harem')} {TextStyle.heart()}"
+    )
+    
+    return message
+
+
+def create_already_caught_message(
+    catcher_name: str,
+    catcher_id: int,
+    character_name: str
+) -> str:
+    """Create message when card was already caught."""
+    return (
+        f"⚡ *ᴛᴏᴏ ꜱʟᴏᴡ!*\n\n"
+        f"[{catcher_name}](tg://user?id={catcher_id}) "
+        f"{TextStyle.to_small_caps('already caught')} *{character_name}*!\n\n"
+        f"💨 {TextStyle.to_small_caps('be faster next time')}..."
+    )
+
+
+def create_wrong_guess_message(similarity: float) -> str:
+    """Create message for wrong guess."""
+    if similarity >= 0.5:
+        hint = f"🤏 {TextStyle.to_small_caps('so close! try again')}..."
+    elif similarity >= 0.3:
+        hint = f"🤔 {TextStyle.to_small_caps('not quite right')}..."
+    else:
+        hint = f"❌ {TextStyle.to_small_caps('wrong character name')}"
+    
+    return hint
