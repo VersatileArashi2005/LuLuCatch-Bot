@@ -365,6 +365,23 @@ async def setup_bot() -> Application:
     register_role_handlers(application)
 
     # ========================================
+    # Register Drop System Handlers
+    # ========================================
+    
+    # Drop commands
+    application.add_handler(setdrop_handler)
+    application.add_handler(droptime_handler)
+    application.add_handler(lulucatch_handler)
+    application.add_handler(forcedrop_handler)
+    application.add_handler(cleardrop_handler)
+    application.add_handler(dropstats_handler)
+    
+    # Message counter (MUST be last - counts messages for drops)
+    application.add_handler(message_counter)
+    
+    app_logger.info("✅ Drop system handlers registered")
+
+    # ========================================
     # Error Handler
     # ========================================
 
