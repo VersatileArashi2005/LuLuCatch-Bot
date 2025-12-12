@@ -1,7 +1,7 @@
 # ============================================================
 # 📁 File: commands/inline_search.py
 # 📍 Location: telegram_card_bot/commands/inline_search.py
-# 📝 Description: Inline search - beautiful card display with owner count
+# 📝 Description: Inline search - clean, bold card display
 # ============================================================
 
 from uuid import uuid4
@@ -42,28 +42,24 @@ def format_card_caption(
     owner_count: int
 ) -> str:
     """
-    Create a beautiful, engaging card caption.
+    Create a clean, bold card caption.
     """
     rarity_name, _, rarity_emoji = rarity_to_text(rarity)
     
     # Owner text
     if owner_count == 0:
-        owner_text = "👤 No owners yet — Be the first!"
+        owner_text = "*ᴏᴡɴᴇʀꜱ:* _None yet_"
     elif owner_count == 1:
-        owner_text = "👤 1 collector owns this"
+        owner_text = "*ᴏᴡɴᴇʀꜱ:* _1 collector_"
     else:
-        owner_text = f"👥 {owner_count} collectors own this"
+        owner_text = f"*ᴏᴡɴᴇʀꜱ:* _{owner_count} collectors_"
     
     caption = (
-        f"┏━━━━━━━━━━━━━━━━━━┓\n"
-        f"   🎴 *CARD DISCOVERED!*\n"
-        f"┗━━━━━━━━━━━━━━━━━━┛\n\n"
-        f"🆔 *Card:* `#{card_id}` — {character_name}\n"
-        f"🎬 *Anime:* {anime}\n"
-        f"✨ *Rarity:* {rarity_name} {rarity_emoji}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"{owner_text}\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
+        f"✨ *ʟᴏᴏᴋ ᴀᴛ ᴛʜɪꜱ ᴄʜᴀʀᴀᴄᴛᴇʀ!*\n\n"
+        f"*{card_id}: {character_name}*\n"
+        f"*{anime}*\n"
+        f"*ʀᴀʀɪᴛʏ:* {rarity_emoji} *{rarity_name}*\n\n"
+        f"{owner_text}"
     )
     
     return caption
@@ -75,7 +71,7 @@ def format_card_caption(
 
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handle inline queries with pagination and owner count.
+    Handle inline queries with pagination.
     """
     if not update.inline_query:
         return
@@ -192,7 +188,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             # Get rarity emoji for preview
             _, _, rarity_emoji = rarity_to_text(rarity)
             
-            # Beautiful caption
+            # Clean caption
             caption = format_card_caption(
                 card_id=card_id,
                 character_name=character_name,
@@ -205,7 +201,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 id=str(uuid4()),
                 photo_file_id=photo_file_id,
                 title=f"{rarity_emoji} {character_name}",
-                description=f"🎬 {anime} • #{card_id} • 👥 {owner_count}",
+                description=f"{anime} • #{card_id} • 👥 {owner_count}",
                 caption=caption,
                 parse_mode="Markdown"
             )
@@ -219,7 +215,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         
         await update.inline_query.answer(
             results=results,
-            cache_time=30,  # Shorter cache for owner count accuracy
+            cache_time=30,
             is_personal=False,
             next_offset=next_offset
         )
