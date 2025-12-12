@@ -289,6 +289,31 @@ async def init_db(pool: Optional[Pool] = None) -> bool:
             )
         """)
         log_database("✅ Groups table ready")
+
+        # ========================================
+        # 4b. Drop System Migration (NEW)
+        # ========================================
+        try:
+            await db.execute("""
+                ALTER TABLE groups 
+                ADD COLUMN IF NOT EXISTS drop_threshold INTEGER DEFAULT 50,
+                ADD COLUMN IF NOT EXISTS drop_enabled BOOLEAN DEFAULT TRUE,
+                ADD COLUMN IF NOT EXISTS message_count INTEGER DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS last_drop_at TIMESTAMP WITH TIME ZONE
+            """)
+        except Exception:
+            pass
+        
+        # Add image_url to cards if not exists
+        try:
+            await db.execute("""
+                ALTER TABLE cards 
+                ADD COLUMN IF NOT EXISTS image_url TEXT
+            """)
+        except Exception:
+            pass
+        
+        log_database("✅ Drop system columns ready")
         
         # ========================================
         # 5. Create Trades Table
