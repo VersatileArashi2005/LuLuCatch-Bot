@@ -82,9 +82,6 @@ from commands.cardinfo import register_cardinfo_handlers
 from commands.trade import register_trade_handlers
 from commands.leaderboard import register_leaderboard_handlers
 
-# Import role handlers
-from handlers.roles import register_role_handlers
-
 # ============================================================
 # 🤖 Telegram Bot Application
 # ============================================================
