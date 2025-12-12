@@ -391,7 +391,7 @@ async def setup_bot() -> Application:
     # Set Bot Commands Menu
     # ========================================
 
-        commands = [
+    commands = [
         BotCommand("start", "🚀 Start the bot"),
         BotCommand("help", "📚 Help & commands"),
         BotCommand("catch", "⚔️ Battle for a card"),
