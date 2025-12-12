@@ -1,17 +1,14 @@
 # ============================================================
 # 📁 File: handlers/upload.py
 # 📍 Location: telegram_card_bot/handlers/upload.py
-# 📝 Description: Professional card upload system (Fixed)
+# 📝 Description: Professional card upload system with notifications
 # ============================================================
 
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-import hashlib
 
 from telegram import (
     Update,
-    PhotoSize,
-    Document,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
@@ -29,11 +26,11 @@ from telegram.error import TelegramError, BadRequest
 from config import Config
 from db import db, ensure_user, get_card_count
 from utils.logger import app_logger, error_logger, log_command
-from utils.rarity import (
-    get_random_rarity,
-    rarity_to_text,
-    RARITY_TABLE,
-)
+from utils.rarity import get_random_rarity, rarity_to_text
+
+# Role check imports
+from handlers.roles import is_uploader
+from handlers.notifications import send_upload_notifications
 
 
 # ============================================================
@@ -152,20 +149,11 @@ async def get_characters_for_anime(anime: str) -> List[str]:
 
 
 async def check_photo_exists(photo_unique_id: str) -> tuple[bool, Optional[int]]:
-    """
-    Check if a photo already exists using unique_id.
-    
-    Args:
-        photo_unique_id: Telegram's unique file identifier
-        
-    Returns:
-        Tuple of (exists: bool, existing_card_id: Optional[int])
-    """
+    """Check if a photo already exists using unique_id."""
     if not db.is_connected:
         return False, None
     
     try:
-        # Check by photo_unique_id if column exists
         query = """
             SELECT card_id, character_name, anime 
             FROM cards 
@@ -179,7 +167,6 @@ async def check_photo_exists(photo_unique_id: str) -> tuple[bool, Optional[int]]
         return False, None
         
     except Exception as e:
-        # Column might not exist, that's okay
         if "column" in str(e).lower() and "does not exist" in str(e).lower():
             return False, None
         error_logger.error(f"Error checking photo existence: {e}")
@@ -187,7 +174,7 @@ async def check_photo_exists(photo_unique_id: str) -> tuple[bool, Optional[int]]
 
 
 # ============================================================
-# 🆕 Direct Card Insert (No duplicate constraint issues)
+# 🆕 Direct Card Insert
 # ============================================================
 
 async def insert_card_direct(
@@ -198,12 +185,7 @@ async def insert_card_direct(
     photo_unique_id: str,
     uploader_id: int
 ) -> Optional[Dict[str, Any]]:
-    """
-    Insert a card directly into the database.
-    
-    Allows multiple cards with same anime+character (different images).
-    Only checks for duplicate photos.
-    """
+    """Insert a card directly into the database."""
     if not db.is_connected:
         raise Exception("Database not connected")
     
@@ -211,7 +193,6 @@ async def insert_card_direct(
         raise ValueError(f"Invalid rarity: {rarity}. Must be 1-11.")
     
     try:
-        # First check if photo_unique_id column exists
         check_column = """
             SELECT column_name FROM information_schema.columns 
             WHERE table_name = 'cards' AND column_name = 'photo_unique_id'
@@ -219,70 +200,38 @@ async def insert_card_direct(
         column_exists = await db.fetchrow(check_column)
         
         if column_exists:
-            # Insert with photo_unique_id
             query = """
                 INSERT INTO cards (
-                    anime, 
-                    character_name, 
-                    rarity, 
-                    photo_file_id,
-                    photo_unique_id,
-                    uploader_id, 
-                    description, 
-                    tags,
-                    created_at,
-                    is_active,
-                    total_caught
+                    anime, character_name, rarity, photo_file_id,
+                    photo_unique_id, uploader_id, description, tags,
+                    created_at, is_active, total_caught
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), TRUE, 0)
                 RETURNING *
             """
-            
             tags = [anime.lower(), character.lower().split()[0] if character else ""]
             description = f"Uploaded by user {uploader_id}"
             
             result = await db.fetchrow(
-                query,
-                anime,
-                character,
-                rarity,
-                photo_file_id,
-                photo_unique_id,
-                uploader_id,
-                description,
-                tags
+                query, anime, character, rarity, photo_file_id,
+                photo_unique_id, uploader_id, description, tags
             )
         else:
-            # Insert without photo_unique_id column
             query = """
                 INSERT INTO cards (
-                    anime, 
-                    character_name, 
-                    rarity, 
-                    photo_file_id, 
-                    uploader_id, 
-                    description, 
-                    tags,
-                    created_at,
-                    is_active,
-                    total_caught
+                    anime, character_name, rarity, photo_file_id,
+                    uploader_id, description, tags,
+                    created_at, is_active, total_caught
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), TRUE, 0)
                 RETURNING *
             """
-            
             tags = [anime.lower(), character.lower().split()[0] if character else ""]
             description = f"Uploaded by user {uploader_id}"
             
             result = await db.fetchrow(
-                query,
-                anime,
-                character,
-                rarity,
-                photo_file_id,
-                uploader_id,
-                description,
-                tags
+                query, anime, character, rarity, photo_file_id,
+                uploader_id, description, tags
             )
         
         if result:
@@ -297,17 +246,12 @@ async def insert_card_direct(
     except Exception as e:
         error_msg = str(e).lower()
         
-        # Handle unique constraint on (anime, character_name) if it exists
         if "unique" in error_msg or "duplicate" in error_msg:
-            # Try to remove the constraint and retry
             if "anime" in error_msg and "character" in error_msg:
-                app_logger.warning("Unique constraint hit - attempting workaround")
-                
-                # Just insert without ON CONFLICT
                 try:
                     query = """
                         INSERT INTO cards (
-                            anime, character_name, rarity, photo_file_id, 
+                            anime, character_name, rarity, photo_file_id,
                             uploader_id, created_at, is_active, total_caught
                         )
                         VALUES ($1, $2, $3, $4, $5, NOW(), TRUE, 0)
@@ -326,15 +270,11 @@ async def insert_card_direct(
 
 
 async def ensure_no_unique_constraint() -> bool:
-    """
-    Remove the unique constraint on (anime, character_name) if it exists.
-    This allows multiple cards with same anime+character but different images.
-    """
+    """Remove the unique constraint on (anime, character_name) if it exists."""
     if not db.is_connected:
         return False
     
     try:
-        # Find and drop the constraint
         query = """
             SELECT constraint_name 
             FROM information_schema.table_constraints 
@@ -351,7 +291,6 @@ async def ensure_no_unique_constraint() -> bool:
             app_logger.info(f"✅ Removed constraint: {constraint_name}")
             return True
         
-        # Also try the common name
         try:
             await db.execute(
                 "ALTER TABLE cards DROP CONSTRAINT IF EXISTS cards_anime_character_unique"
@@ -377,7 +316,6 @@ async def add_photo_unique_id_column() -> bool:
             ADD COLUMN IF NOT EXISTS photo_unique_id TEXT
         """)
         
-        # Add index for faster lookups
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_cards_photo_unique_id 
             ON cards(photo_unique_id)
@@ -403,17 +341,17 @@ async def upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     # Check if in private chat
     if chat.type != ChatType.PRIVATE:
         await update.message.reply_text(
-            "❌ *Upload Restricted*\n\n"
+            "❌ *ᴜᴘʟᴏᴀᴅ ʀᴇꜱᴛʀɪᴄᴛᴇᴅ*\n\n"
             "Card uploads can only be done in private messages.\n"
             f"Please message me directly: @{Config.BOT_USERNAME}",
             parse_mode="Markdown"
         )
         return ConversationHandler.END
 
-    # Check admin permissions
-    if not Config.is_admin(user.id):
+    # Check upload permissions (Owner, Dev, Admin, or Uploader)
+    if not await is_uploader(user.id):
         await update.message.reply_text(
-            "❌ *Permission Denied*\n\n"
+            "❌ *ᴘᴇʀᴍɪꜱꜱɪᴏɴ ᴅᴇɴɪᴇᴅ*\n\n"
             "Only authorized uploaders can add new cards.\n"
             "Contact an admin if you'd like to contribute!",
             parse_mode="Markdown"
@@ -424,7 +362,7 @@ async def upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     is_cooldown, remaining = check_upload_cooldown(user.id)
     if is_cooldown:
         await update.message.reply_text(
-            f"⏳ *Too Fast!*\n\n"
+            f"⏳ *ᴛᴏᴏ ꜰᴀꜱᴛ!*\n\n"
             f"Please wait {remaining} seconds before uploading another card.",
             parse_mode="Markdown"
         )
@@ -484,7 +422,7 @@ async def show_anime_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     text = (
-        "📤 *Card Upload - Step 1/5*\n\n"
+        "📤 *ᴄᴀʀᴅ ᴜᴘʟᴏᴀᴅ - ꜱᴛᴇᴘ 1/5*\n\n"
         "🎬 *Choose Anime:*\n\n"
         "Select an existing anime or add a new one."
     )
@@ -526,7 +464,7 @@ async def handle_anime_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if data == "up_anime_new":
         try:
             await query.edit_message_text(
-                "📤 *Card Upload - Step 1/5*\n\n"
+                "📤 *ᴄᴀʀᴅ ᴜᴘʟᴏᴀᴅ - ꜱᴛᴇᴘ 1/5*\n\n"
                 "🎬 *Enter the new Anime name:*\n\n"
                 "Type the anime/series name:",
                 parse_mode="Markdown"
@@ -610,10 +548,10 @@ async def show_character_selection(update: Update, context: ContextTypes.DEFAULT
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     text = (
-        "📤 *Card Upload - Step 2/5*\n\n"
+        "📤 *ᴄᴀʀᴅ ᴜᴘʟᴏᴀᴅ - ꜱᴛᴇᴘ 2/5*\n\n"
         f"🎬 *Anime:* {anime}\n\n"
         "👤 *Choose Character:*\n\n"
-        "💡 Same character can have multiple cards (different images)."
+        "💡 Same character can have multiple cards."
     )
     
     try:
@@ -656,7 +594,7 @@ async def handle_character_callback(update: Update, context: ContextTypes.DEFAUL
         
         try:
             await query.edit_message_text(
-                f"📤 *Card Upload - Step 2/5*\n\n"
+                f"📤 *ᴄᴀʀᴅ ᴜᴘʟᴏᴀᴅ - ꜱᴛᴇᴘ 2/5*\n\n"
                 f"🎬 *Anime:* {anime}\n\n"
                 f"👤 *Enter Character name:*",
                 parse_mode="Markdown"
@@ -743,7 +681,7 @@ async def show_rarity_selection(update: Update, context: ContextTypes.DEFAULT_TY
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     text = (
-        "📤 *Card Upload - Step 3/5*\n\n"
+        "📤 *ᴄᴀʀᴅ ᴜᴘʟᴏᴀᴅ - ꜱᴛᴇᴘ 3/5*\n\n"
         f"🎬 *Anime:* {anime}\n"
         f"👤 *Character:* {character}\n\n"
         "✨ *Choose Rarity:*"
@@ -823,7 +761,7 @@ async def show_photo_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     text = (
-        "📤 *Card Upload - Step 4/5*\n\n"
+        "📤 *ᴄᴀʀᴅ ᴜᴘʟᴏᴀᴅ - ꜱᴛᴇᴘ 4/5*\n\n"
         f"🎬 *Anime:* {anime}\n"
         f"👤 *Character:* {character}\n"
         f"✨ *Rarity:* {rarity_emoji} {rarity_name}\n\n"
@@ -915,7 +853,7 @@ async def show_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     rarity_name, rarity_prob, rarity_emoji = rarity_to_text(rarity)
     
     caption = (
-        "🔎 *Preview - Step 5/5*\n\n"
+        "🔎 *ᴘʀᴇᴠɪᴇᴡ - ꜱᴛᴇᴘ 5/5*\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"🎬 *Anime:* {anime}\n"
         f"👤 *Character:* {character}\n"
@@ -992,14 +930,14 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Show processing
     try:
         await query.edit_message_caption(
-            caption="⏳ *Saving card...*",
+            caption="⏳ *ꜱᴀᴠɪɴɢ ᴄᴀʀᴅ...*",
             parse_mode="Markdown"
         )
     except TelegramError:
         pass
     
     try:
-        # Check for duplicate photo (optional - won't block if column doesn't exist)
+        # Check for duplicate photo
         if photo_unique_id:
             photo_exists, existing_id = await check_photo_exists(photo_unique_id)
             if photo_exists:
@@ -1009,7 +947,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 ]
                 await query.edit_message_caption(
                     caption=(
-                        f"⚠️ *Duplicate Photo!*\n\n"
+                        f"⚠️ *ᴅᴜᴘʟɪᴄᴀᴛᴇ ᴘʜᴏᴛᴏ!*\n\n"
                         f"This image is already Card `#{existing_id}`.\n\n"
                         f"Please use a different image."
                     ),
@@ -1037,15 +975,30 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         set_upload_cooldown(user.id)
         total_cards = await get_card_count(None)
         
+        # Send notifications (channel + groups)
+        notification_results = await send_upload_notifications(
+            bot=context.bot,
+            card=card,
+            uploader_name=user.first_name,
+            uploader_id=user.id
+        )
+        
+        # Build success message
+        channel_status = "✅" if notification_results["channel_archived"] else "❌"
+        groups_notified = notification_results["groups_notified"]
+        groups_total = notification_results["groups_total"]
+        
         success_caption = (
-            "🎉 *Upload Successful!*\n\n"
+            "🎉 *ᴜᴘʟᴏᴀᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ!*\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"🆔 *Card ID:* `#{card_id}`\n"
             f"🎬 *Anime:* {anime}\n"
             f"👤 *Character:* {character}\n"
             f"✨ *Rarity:* {rarity_emoji} {rarity_name}\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📦 Total cards: {total_cards:,}\n\n"
+            f"📦 *Total cards:* {total_cards:,}\n\n"
+            f"📺 *Channel:* {channel_status}\n"
+            f"📢 *Groups:* {groups_notified}/{groups_total}\n\n"
             f"Use /upload to add more!"
         )
         
@@ -1070,7 +1023,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             await query.edit_message_caption(
                 caption=(
-                    f"❌ *Upload Failed*\n\n"
+                    f"❌ *ᴜᴘʟᴏᴀᴅ ꜰᴀɪʟᴇᴅ*\n\n"
                     f"Error: {str(e)[:100]}\n\n"
                     f"Please try again or cancel."
                 ),
@@ -1113,7 +1066,7 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     ]
     
     text = (
-        "✏️ *Edit Upload*\n\n"
+        "✏️ *ᴇᴅɪᴛ ᴜᴘʟᴏᴀᴅ*\n\n"
         f"🎬 Anime: {anime}\n"
         f"👤 Character: {character}\n"
         f"✨ Rarity: {rarity_emoji} {rarity_name}\n\n"
@@ -1180,19 +1133,19 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     
     try:
         await query.edit_message_caption(
-            caption="❌ *Upload Cancelled*\n\nUse /upload to start again.",
+            caption="❌ *ᴜᴘʟᴏᴀᴅ ᴄᴀɴᴄᴇʟʟᴇᴅ*\n\nUse /upload to start again.",
             parse_mode="Markdown"
         )
     except (BadRequest, TelegramError):
         try:
             await query.edit_message_text(
-                text="❌ *Upload Cancelled*\n\nUse /upload to start again.",
+                text="❌ *ᴜᴘʟᴏᴀᴅ ᴄᴀɴᴄᴇʟʟᴇᴅ*\n\nUse /upload to start again.",
                 parse_mode="Markdown"
             )
         except TelegramError:
             try:
                 await query.message.reply_text(
-                    "❌ *Upload Cancelled*\n\nUse /upload to start again.",
+                    "❌ *ᴜᴘʟᴏᴀᴅ ᴄᴀɴᴄᴇʟʟᴇᴅ*\n\nUse /upload to start again.",
                     parse_mode="Markdown"
                 )
             except TelegramError:
@@ -1208,7 +1161,7 @@ async def handle_cancel_command(update: Update, context: ContextTypes.DEFAULT_TY
     clear_upload_data(context)
     
     await update.message.reply_text(
-        "❌ *Upload Cancelled*\n\nUse /upload to start again.",
+        "❌ *ᴜᴘʟᴏᴀᴅ ᴄᴀɴᴄᴇʟʟᴇᴅ*\n\nUse /upload to start again.",
         parse_mode="Markdown"
     )
     
@@ -1224,13 +1177,13 @@ async def quick_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user = update.effective_user
     message = update.message
 
-    if not Config.is_admin(user.id):
-        await message.reply_text("❌ Admin only.")
+    if not await is_uploader(user.id):
+        await message.reply_text("❌ Uploaders only.")
         return
 
     if not message.reply_to_message or not message.reply_to_message.photo:
         await message.reply_text(
-            "📤 *Quick Upload*\n\n"
+            "📤 *ǫᴜɪᴄᴋ ᴜᴘʟᴏᴀᴅ*\n\n"
             "Reply to a photo with:\n"
             "`/quickupload Anime | Character | Rarity`\n\n"
             "Example:\n"
@@ -1276,7 +1229,6 @@ async def quick_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     photo_file_id = photo.file_id
     photo_unique_id = photo.file_unique_id
 
-    # Ensure no constraint issues
     await ensure_no_unique_constraint()
 
     try:
@@ -1291,12 +1243,26 @@ async def quick_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         if card:
             rarity_name, _, rarity_emoji = rarity_to_text(rarity_id)
+            
+            # Send notifications
+            notification_results = await send_upload_notifications(
+                bot=context.bot,
+                card=card,
+                uploader_name=user.first_name,
+                uploader_id=user.id
+            )
+            
+            channel_status = "✅" if notification_results["channel_archived"] else "❌"
+            groups_notified = notification_results["groups_notified"]
+            
             await message.reply_text(
-                f"✅ *Card Uploaded!*\n\n"
+                f"✅ *ᴄᴀʀᴅ ᴜᴘʟᴏᴀᴅᴇᴅ!*\n\n"
                 f"🆔 `#{card['card_id']}`\n"
                 f"🎬 {anime}\n"
                 f"👤 {character}\n"
-                f"✨ {rarity_emoji} {rarity_name}",
+                f"✨ {rarity_emoji} {rarity_name}\n\n"
+                f"📺 Channel: {channel_status}\n"
+                f"📢 Groups: {groups_notified} notified",
                 parse_mode="Markdown"
             )
         else:
@@ -1311,7 +1277,6 @@ async def quick_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # 🔧 Conversation Handler Export
 # ============================================================
 
-# Global cancel callback pattern
 cancel_pattern = r"^up_cancel$"
 
 upload_conversation_handler = ConversationHandler(
@@ -1369,7 +1334,6 @@ upload_conversation_handler = ConversationHandler(
     per_message=False,
 )
 
-# Dummy handler for old pattern (backwards compatibility)
 upload_rarity_callback_handler = CallbackQueryHandler(
     lambda u, c: None,
     pattern=r"^upload_rarity_never_match$"
