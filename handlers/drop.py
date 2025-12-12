@@ -48,6 +48,7 @@ CATCH_REACTIONS = {"common": ["👍", "🎉"], "rare": ["🔥", "⭐", "🎉"], 
 
 active_drops: Dict[int, Dict[str, Any]] = {}
 message_counters: Dict[int, int] = {}
+drop_locks: Dict[int, bool] = {}  # Prevent race conditions
 
 async def get_group_drop_settings(group_id: int) -> Dict[str, Any]:
     try:
@@ -166,7 +167,7 @@ def create_drop_caption(rarity: int, group_name: str) -> str:
         f"📍 *{styled_group}*\n"
         f"✨ Rarity: *{rarity_name}*\n\n"
         f"🎯 Catch with:\n"
-        f"/lulucatch"
+        f"`/lulucatch <name>`"
     )
 
 def create_catch_success_message(user_name: str, user_id: int, character_name: str, anime: str, rarity: int, is_new: bool = True) -> str:
@@ -257,31 +258,70 @@ async def droptime_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 async def spawn_card_drop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, chat_title: Optional[str] = None) -> bool:
+    # Check if already processing a drop for this group
+    if drop_locks.get(chat_id, False):
+        return False
+    
+    # Set lock
+    drop_locks[chat_id] = True
+    
     try:
+        # Check for existing active drop
         if chat_id in active_drops:
             spawned_at = active_drops[chat_id].get("spawned_at")
             if spawned_at and (datetime.now() - spawned_at).seconds < DROP_TIMEOUT:
+                drop_locks[chat_id] = False
                 return False
             del active_drops[chat_id]
+        
+        # Reset count FIRST to prevent race condition
+        await reset_message_count(chat_id)
+        
+        # Get random card
         card = await get_random_card_for_drop()
         if not card:
             error_logger.warning(f"No cards available for drop in group {chat_id}")
+            drop_locks[chat_id] = False
             return False
-        rarity, caption = card["rarity"], create_drop_caption(card["rarity"], chat_title)
+        
+        rarity = card["rarity"]
+        caption = create_drop_caption(rarity, chat_title)
         photo_file_id = card.get("photo_file_id")
+        
         if not photo_file_id:
             error_logger.warning(f"Card {card['card_id']} has no photo_file_id")
+            drop_locks[chat_id] = False
             return False
-        message = await context.bot.send_photo(chat_id=chat_id, photo=photo_file_id, caption=caption, parse_mode=ParseMode.MARKDOWN, has_spoiler=True)
-        active_drops[chat_id] = {"card": card, "message_id": message.message_id, "spawned_at": datetime.now(), "caught_by": None}
-        await reset_message_count(chat_id)
+        
+        # Send the card
+        message = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=photo_file_id,
+            caption=caption,
+            parse_mode=ParseMode.MARKDOWN,
+            has_spoiler=True
+        )
+        
+        # Store active drop
+        active_drops[chat_id] = {
+            "card": card,
+            "message_id": message.message_id,
+            "spawned_at": datetime.now(),
+            "caught_by": None
+        }
+        
         app_logger.info(f"🎴 Card dropped in group {chat_id}: {card['character_name']} ({card['card_id']}) - Rarity: {rarity}")
+        
+        drop_locks[chat_id] = False
         return True
+        
     except TelegramError as e:
         error_logger.error(f"Failed to spawn card drop: {e}")
+        drop_locks[chat_id] = False
         return False
     except Exception as e:
         error_logger.error(f"Unexpected error in spawn_card_drop: {e}", exc_info=True)
+        drop_locks[chat_id] = False
         return False
 
 async def lulucatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -406,11 +446,22 @@ async def message_counter_handler(update: Update, context: ContextTypes.DEFAULT_
         return
     if update.message and update.message.text and update.message.text.startswith('/'):
         return
+    
     chat = update.effective_chat
+    
+    # Skip if there's already an active drop
+    if chat.id in active_drops and not active_drops[chat.id].get("caught_by"):
+        return
+    
+    # Skip if currently processing a drop
+    if drop_locks.get(chat.id, False):
+        return
+    
     try:
         await ensure_group_exists(chat.id, chat.title)
         new_count = await increment_message_count(chat.id)
         settings = await get_group_drop_settings(chat.id)
+        
         if new_count >= settings["threshold"]:
             if await spawn_card_drop(context, chat.id, chat.title):
                 app_logger.info(f"🎴 Auto-drop in {chat.id} ({new_count}/{settings['threshold']})")
