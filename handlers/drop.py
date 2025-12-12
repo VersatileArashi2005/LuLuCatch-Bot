@@ -530,3 +530,227 @@ def create_wrong_guess_message(similarity: float) -> str:
         hint = f"❌ {TextStyle.to_small_caps('wrong character name')}"
     
     return hint
+
+
+# ============================================================
+# 🎮 Command: /setdrop - Set Drop Threshold (Owner Only)
+# ============================================================
+
+async def setdrop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /setdrop command - Set message threshold for drops."""
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    log_command(user.id, "setdrop", chat.id)
+    
+    # Only bot owner can use this command
+    if not Config.is_admin(user.id):
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('only bot owner can use this command')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Check if in group
+    if chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('this command only works in groups')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Get threshold from arguments
+    if not context.args:
+        # Show current settings
+        settings = await get_group_drop_settings(chat.id)
+        
+        await update.message.reply_text(
+            f"⚙️ *ᴅʀᴏᴘ ꜱᴇᴛᴛɪɴɢꜱ*\n\n"
+            f"╭─────────────────────────╮\n"
+            f"│  📊 *ᴄᴜʀʀᴇɴᴛ ᴛʜʀᴇꜱʜᴏʟᴅ:* `{settings['threshold']}`\n"
+            f"│  💬 *ᴍᴇꜱꜱᴀɢᴇ ᴄᴏᴜɴᴛ:* `{settings['message_count']}`\n"
+            f"│  ✅ *ᴇɴᴀʙʟᴇᴅ:* `{settings['enabled']}`\n"
+            f"╰─────────────────────────╯\n\n"
+            f"📝 *ᴜꜱᴀɢᴇ:* `/setdrop <amount>`\n"
+            f"📌 *ᴇxᴀᴍᴘʟᴇ:* `/setdrop 50`\n\n"
+            f"_{TextStyle.to_small_caps('range')}: {MIN_DROP_THRESHOLD} - {MAX_DROP_THRESHOLD}_",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Parse threshold
+    try:
+        threshold = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('please provide a valid number')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Validate range
+    if threshold < MIN_DROP_THRESHOLD or threshold > MAX_DROP_THRESHOLD:
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('threshold must be between')} "
+            f"`{MIN_DROP_THRESHOLD}` {TextStyle.to_small_caps('and')} `{MAX_DROP_THRESHOLD}`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Ensure group exists
+    await ensure_group_exists(chat.id, chat.title)
+    
+    # Set threshold
+    success = await set_group_drop_threshold(chat.id, threshold)
+    
+    if success:
+        await update.message.reply_text(
+            f"✅ *ᴅʀᴏᴘ ᴛʜʀᴇꜱʜᴏʟᴅ ᴜᴘᴅᴀᴛᴇᴅ!*\n\n"
+            f"╭─────────────────────────╮\n"
+            f"│  🎯 *ɴᴇᴡ ᴛʜʀᴇꜱʜᴏʟᴅ:* `{threshold}` ᴍꜱɢꜱ\n"
+            f"╰─────────────────────────╯\n\n"
+            f"✨ {TextStyle.to_small_caps('a card will drop every')} `{threshold}` "
+            f"{TextStyle.to_small_caps('messages')}!",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        app_logger.info(f"⚙️ Drop threshold set to {threshold} in group {chat.id} by {user.id}")
+    else:
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('failed to update settings. please try again.')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+
+# ============================================================
+# ⏱️ Command: /droptime - Check Remaining Messages
+# ============================================================
+
+async def droptime_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /droptime command - Check messages until next drop."""
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    log_command(user.id, "droptime", chat.id)
+    
+    # Check if in group
+    if chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('this command only works in groups')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Get settings
+    settings = await get_group_drop_settings(chat.id)
+    
+    threshold = settings["threshold"]
+    current = settings["message_count"]
+    remaining = max(0, threshold - current)
+    
+    # Calculate progress percentage
+    progress = min(100, int((current / threshold) * 100)) if threshold > 0 else 0
+    
+    # Create progress bar
+    filled = int(progress / 10)
+    empty = 10 - filled
+    progress_bar = "▓" * filled + "░" * empty
+    
+    # Check if there's an active drop
+    active_drop = active_drops.get(chat.id)
+    active_status = ""
+    
+    if active_drop:
+        active_status = (
+            f"\n\n🚨 *ᴀᴄᴛɪᴠᴇ ᴅʀᴏᴘ!*\n"
+            f"   {TextStyle.to_small_caps('a character is waiting to be caught')}!\n"
+            f"   {TextStyle.to_small_caps('use')} `/lulucatch <name>`"
+        )
+    
+    await update.message.reply_text(
+        f"⏱️ *ᴅʀᴏᴘ ꜱᴛᴀᴛᴜꜱ*\n\n"
+        f"╭─────────────────────────╮\n"
+        f"│  📊 *ᴘʀᴏɢʀᴇꜱꜱ:* {progress}%\n"
+        f"│  [{progress_bar}]\n"
+        f"│\n"
+        f"│  💬 *ᴍᴇꜱꜱᴀɢᴇꜱ:* `{current}` / `{threshold}`\n"
+        f"│  ⏳ *ʀᴇᴍᴀɪɴɪɴɢ:* `{remaining}` ᴍꜱɢꜱ\n"
+        f"╰─────────────────────────╯"
+        f"{active_status}\n\n"
+        f"💡 _{TextStyle.to_small_caps('keep chatting to trigger a drop')}!_",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+# ============================================================
+# 🎴 Spawn Card Drop
+# ============================================================
+
+async def spawn_card_drop(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    chat_title: Optional[str] = None
+) -> bool:
+    """Spawn a random card in the group."""
+    try:
+        # Check if there's already an active drop
+        if chat_id in active_drops:
+            # Check if it's expired
+            spawned_at = active_drops[chat_id].get("spawned_at")
+            if spawned_at and (datetime.now() - spawned_at).seconds < DROP_TIMEOUT:
+                return False  # Still active, don't spawn new one
+            else:
+                # Expired, remove it
+                del active_drops[chat_id]
+        
+        # Get random card
+        card = await get_random_card_for_drop()
+        
+        if not card:
+            error_logger.warning(f"No cards available for drop in group {chat_id}")
+            return False
+        
+        # Create caption
+        rarity = card["rarity"]
+        caption = create_drop_caption(rarity, chat_title)
+        
+        # Send the card with spoiler
+        image_url = card.get("image_url")
+        
+        if not image_url:
+            error_logger.warning(f"Card {card['card_id']} has no image URL")
+            return False
+        
+        # Send photo with spoiler effect
+        message = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=image_url,
+            caption=caption,
+            parse_mode=ParseMode.MARKDOWN,
+            has_spoiler=True  # This creates the spoiler effect!
+        )
+        
+        # Store active drop
+        active_drops[chat_id] = {
+            "card": card,
+            "message_id": message.message_id,
+            "spawned_at": datetime.now(),
+            "caught_by": None,
+        }
+        
+        # Reset message count
+        await reset_message_count(chat_id)
+        
+        app_logger.info(
+            f"🎴 Card dropped in group {chat_id}: "
+            f"{card['character_name']} ({card['card_id']}) - Rarity: {rarity}"
+        )
+        
+        return True
+        
+    except TelegramError as e:
+        error_logger.error(f"Failed to spawn card drop: {e}")
+        return False
+    except Exception as e:
+        error_logger.error(f"Unexpected error in spawn_card_drop: {e}", exc_info=True)
+        return False
