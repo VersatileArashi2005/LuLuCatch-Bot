@@ -992,3 +992,205 @@ async def message_counter_handler(update: Update, context: ContextTypes.DEFAULT_
     
     except Exception as e:
         error_logger.error(f"Error in message counter: {e}", exc_info=True)
+
+
+# ============================================================
+# 👑 Admin Commands for Drop System
+# ============================================================
+
+async def forcedrop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /forcedrop command - Force a card drop (Admin only)."""
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    log_command(user.id, "forcedrop", chat.id)
+    
+    # Only bot owner can use this command
+    if not Config.is_admin(user.id):
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('only bot owner can use this command')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Check if in group
+    if chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('this command only works in groups')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Check if there's already an active drop
+    if chat.id in active_drops:
+        drop = active_drops[chat.id]
+        if not drop.get("caught_by"):
+            await update.message.reply_text(
+                f"⚠️ {TextStyle.to_small_caps('there is already an active drop')}!\n\n"
+                f"💡 {TextStyle.to_small_caps('use')} `/cleardrop` {TextStyle.to_small_caps('to remove it first')}.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+    
+    # Force spawn
+    await update.message.reply_text(
+        f"🎲 {TextStyle.to_small_caps('forcing a drop')}...",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    success = await spawn_card_drop(context, chat.id, chat.title)
+    
+    if not success:
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('failed to spawn drop. check if cards exist in database.')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        app_logger.info(f"🎲 Force drop triggered by admin {user.id} in group {chat.id}")
+
+
+async def cleardrop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /cleardrop command - Clear active drop (Admin only)."""
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    log_command(user.id, "cleardrop", chat.id)
+    
+    # Only bot owner can use this command
+    if not Config.is_admin(user.id):
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('only bot owner can use this command')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Check if in group
+    if chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('this command only works in groups')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Check if there's an active drop
+    if chat.id not in active_drops:
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('no active drop to clear')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Clear the drop
+    del active_drops[chat.id]
+    
+    await update.message.reply_text(
+        f"✅ {TextStyle.to_small_caps('active drop cleared')}!",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    app_logger.info(f"🗑️ Drop cleared by admin {user.id} in group {chat.id}")
+
+
+async def dropstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /dropstats command - View drop statistics (Admin only)."""
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    log_command(user.id, "dropstats", chat.id)
+    
+    # Only bot owner can use this command
+    if not Config.is_admin(user.id):
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('only bot owner can use this command')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Get all group stats
+    try:
+        groups = await db.fetch(
+            """
+            SELECT group_id, group_name, drop_threshold, message_count, 
+                   total_catches, total_spawns, drop_enabled
+            FROM groups 
+            WHERE drop_enabled = TRUE
+            ORDER BY total_catches DESC
+            LIMIT 10
+            """
+        )
+    except Exception as e:
+        error_logger.error(f"Failed to get drop stats: {e}")
+        await update.message.reply_text(
+            f"❌ {TextStyle.to_small_caps('failed to fetch statistics')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    if not groups:
+        await update.message.reply_text(
+            f"📊 {TextStyle.to_small_caps('no groups with drop system active')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Build stats message
+    stats_lines = []
+    for i, g in enumerate(groups, 1):
+        name = g["group_name"] or "Unknown"
+        if len(name) > 15:
+            name = name[:12] + "..."
+        
+        catches = g["total_catches"] or 0
+        threshold = g["drop_threshold"] or DEFAULT_DROP_THRESHOLD
+        current = g["message_count"] or 0
+        
+        stats_lines.append(
+            f"{i}. *{name}*\n"
+            f"    🎯 `{catches}` ᴄᴀᴛᴄʜᴇꜱ │ 💬 `{current}`/`{threshold}`"
+        )
+    
+    stats_text = "\n\n".join(stats_lines)
+    
+    # Count active drops
+    active_count = len([d for d in active_drops.values() if not d.get("caught_by")])
+    
+    await update.message.reply_text(
+        f"📊 *ᴅʀᴏᴘ ꜱʏꜱᴛᴇᴍ ꜱᴛᴀᴛɪꜱᴛɪᴄꜱ*\n\n"
+        f"╭─────────────────────────╮\n"
+        f"│  🌐 *ᴀᴄᴛɪᴠᴇ ɢʀᴏᴜᴘꜱ:* `{len(groups)}`\n"
+        f"│  🎴 *ᴀᴄᴛɪᴠᴇ ᴅʀᴏᴘꜱ:* `{active_count}`\n"
+        f"╰─────────────────────────╯\n\n"
+        f"🏆 *ᴛᴏᴘ ɢʀᴏᴜᴘꜱ ʙʏ ᴄᴀᴛᴄʜᴇꜱ:*\n\n"
+        f"{stats_text}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+# ============================================================
+# 🔧 Handler Exports
+# ============================================================
+
+# Command Handlers
+setdrop_handler = CommandHandler("setdrop", setdrop_command)
+droptime_handler = CommandHandler("droptime", droptime_command)
+lulucatch_handler = CommandHandler("lulucatch", lulucatch_command)
+forcedrop_handler = CommandHandler("forcedrop", forcedrop_command)
+cleardrop_handler = CommandHandler("cleardrop", cleardrop_command)
+dropstats_handler = CommandHandler("dropstats", dropstats_command)
+
+# Message counter (counts all non-command text messages in groups)
+message_counter = MessageHandler(
+    filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
+    message_counter_handler
+)
+
+# Export all handlers as a list for easy registration
+drop_handlers = [
+    setdrop_handler,
+    droptime_handler,
+    lulucatch_handler,
+    forcedrop_handler,
+    cleardrop_handler,
+    dropstats_handler,
+    message_counter,
+]
