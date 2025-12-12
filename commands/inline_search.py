@@ -1,7 +1,7 @@
 # ============================================================
 # 📁 File: commands/inline_search.py
 # 📍 Location: telegram_card_bot/commands/inline_search.py
-# 📝 Description: Inline search - shows characters, then their cards (images only)
+# 📝 Description: Inline search - search characters and show card images
 # ============================================================
 
 from uuid import uuid4
@@ -19,7 +19,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from db import db, get_unique_characters, get_cards_by_character
+from db import db, get_unique_characters
 from utils.logger import app_logger, error_logger
 from utils.rarity import get_rarity_emoji
 
@@ -29,7 +29,6 @@ from utils.rarity import get_rarity_emoji
 # ============================================================
 
 MAX_RESULTS = 50
-MIN_QUERY_LENGTH = 1
 
 
 # ============================================================
@@ -40,9 +39,8 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     """
     Handle inline queries.
     
-    - Empty/short query: Show character name suggestions
-    - "char:CharacterName": Show all cards for that character (images only)
-    - Regular query: Search and show character suggestions
+    - Empty query: Show all available characters (as article suggestions)
+    - With query: Search and show matching card images directly
     """
     if not update.inline_query:
         return
@@ -70,54 +68,46 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     # ========================================
-    # Check if user selected a character (show cards)
+    # Empty query - show character list
     # ========================================
-    if query.startswith("char:"):
-        character_name = query[5:].strip()
-        await show_character_cards(update, character_name)
+    if not query:
+        await show_character_list(update)
         return
     
     # ========================================
-    # Show character suggestions
+    # Has query - show matching card images
     # ========================================
-    await show_character_suggestions(update, query)
+    await show_matching_cards(update, query)
 
 
 # ============================================================
-# 👤 Show Character Suggestions
+# 👤 Show Character List (Empty Query)
 # ============================================================
 
-async def show_character_suggestions(update: Update, query: str) -> None:
+async def show_character_list(update: Update) -> None:
     """
-    Show list of character names matching the query.
-    Tapping a character will trigger showing their cards.
+    Show list of all available character names.
+    User can tap to see the name, then type it to search.
     """
     try:
-        # Get unique characters
-        if query and len(query) >= MIN_QUERY_LENGTH:
-            characters = await get_unique_characters(None, query, MAX_RESULTS)
-        else:
-            # Empty query - show all characters
-            characters = await get_unique_characters(None, None, MAX_RESULTS)
+        characters = await get_unique_characters(None, None, MAX_RESULTS)
         
-        # No results
         if not characters:
             await update.inline_query.answer(
                 results=[
                     InlineQueryResultArticle(
                         id=str(uuid4()),
-                        title="🔍 No characters found",
-                        description=f"No results for '{query}'" if query else "No characters available",
+                        title="📭 No characters available",
+                        description="No cards have been uploaded yet",
                         input_message_content=InputTextMessageContent(
-                            message_text=f"No characters found for: {query}" if query else "No characters available"
+                            message_text="No characters available"
                         )
                     )
                 ],
-                cache_time=30
+                cache_time=60
             )
             return
         
-        # Build character suggestions
         results = []
         
         for char in characters:
@@ -125,59 +115,68 @@ async def show_character_suggestions(update: Update, query: str) -> None:
             anime = char["anime"]
             card_count = char["card_count"]
             
-            # Create article result that switches query to show cards
             result = InlineQueryResultArticle(
                 id=str(uuid4()),
                 title=f"👤 {character_name}",
-                description=f"🎬 {anime} • 🎴 {card_count} card(s)",
+                description=f"🎬 {anime} • 🎴 {card_count} card(s) — Type name to see cards",
                 input_message_content=InputTextMessageContent(
-                    message_text=f"👤 {character_name}\n🎬 {anime}"
-                ),
-                # This is the key: when user taps, it changes query to "char:Name"
-                # But Telegram doesn't support this directly, so we use switch_inline_query
+                    message_text=f"👤 *{character_name}*\n🎬 {anime}",
+                    parse_mode="Markdown"
+                )
             )
             results.append(result)
         
         await update.inline_query.answer(
             results=results,
-            cache_time=60,
+            cache_time=120,
             is_personal=False,
-            switch_pm_text="💡 Tap a name, then add 'char:' prefix",
+            switch_pm_text="💡 Type a character name to see cards",
             switch_pm_parameter="inline_help"
         )
         
-        app_logger.info(f"✅ Showed {len(results)} character suggestions")
+        app_logger.info(f"✅ Showed {len(results)} characters")
         
     except Exception as e:
-        error_logger.error(f"Error showing character suggestions: {e}", exc_info=True)
+        error_logger.error(f"Error showing character list: {e}", exc_info=True)
 
 
 # ============================================================
-# 🎴 Show Character Cards (Images Only)
+# 🎴 Show Matching Cards (With Query)
 # ============================================================
 
-async def show_character_cards(update: Update, character_name: str) -> None:
+async def show_matching_cards(update: Update, query: str) -> None:
     """
-    Show all cards for a specific character.
-    Displays images only, no text captions.
+    Search for cards matching the query and show images only.
+    Searches both character names and anime names.
     """
-    if not character_name:
-        await update.inline_query.answer(results=[], cache_time=5)
-        return
-    
     try:
-        # Get all cards for this character
-        cards = await get_cards_by_character(None, character_name, MAX_RESULTS)
+        # Search in database
+        search_pattern = f"%{query}%"
+        
+        cards = await db.fetch(
+            """
+            SELECT card_id, character_name, anime, rarity, photo_file_id
+            FROM cards
+            WHERE is_active = TRUE
+              AND (
+                LOWER(character_name) LIKE LOWER($1)
+                OR LOWER(anime) LIKE LOWER($1)
+              )
+            ORDER BY rarity DESC, character_name ASC
+            LIMIT $2
+            """,
+            search_pattern, MAX_RESULTS
+        )
         
         if not cards:
             await update.inline_query.answer(
                 results=[
                     InlineQueryResultArticle(
                         id=str(uuid4()),
-                        title=f"❌ No cards for '{character_name}'",
-                        description="Try a different character name",
+                        title=f"🔍 No results for '{query}'",
+                        description="Try a different search term",
                         input_message_content=InputTextMessageContent(
-                            message_text=f"No cards found for: {character_name}"
+                            message_text=f"No cards found for: {query}"
                         )
                     )
                 ],
@@ -185,27 +184,27 @@ async def show_character_cards(update: Update, character_name: str) -> None:
             )
             return
         
-        # Build image results (NO CAPTION - images only)
         results = []
         
         for card in cards:
-            card_id = card["card_id"]
             photo_file_id = card.get("photo_file_id")
-            rarity = card.get("rarity", 1)
             
             if not photo_file_id:
                 continue
             
-            # Get rarity emoji for title
+            card_id = card["card_id"]
+            character_name = card["character_name"]
+            anime = card["anime"]
+            rarity = card.get("rarity", 1)
             rarity_emoji = get_rarity_emoji(rarity)
             
-            # Create photo result with NO caption (image only)
+            # Image only - empty caption
             result = InlineQueryResultCachedPhoto(
                 id=str(uuid4()),
                 photo_file_id=photo_file_id,
                 title=f"{rarity_emoji} {character_name}",
-                description=f"Card #{card_id}",
-                caption="",  # Empty caption = image only
+                description=f"🎬 {anime} • #{card_id}",
+                caption="",  # No caption = image only
             )
             results.append(result)
         
@@ -214,10 +213,10 @@ async def show_character_cards(update: Update, character_name: str) -> None:
                 results=[
                     InlineQueryResultArticle(
                         id=str(uuid4()),
-                        title=f"❌ No images for '{character_name}'",
-                        description="Cards exist but have no images",
+                        title=f"❌ No images for '{query}'",
+                        description="Cards found but no images available",
                         input_message_content=InputTextMessageContent(
-                            message_text=f"No card images found for: {character_name}"
+                            message_text=f"No card images for: {query}"
                         )
                     )
                 ],
@@ -231,10 +230,10 @@ async def show_character_cards(update: Update, character_name: str) -> None:
             is_personal=False
         )
         
-        app_logger.info(f"✅ Showed {len(results)} cards for '{character_name}'")
+        app_logger.info(f"✅ Showed {len(results)} cards for '{query}'")
         
     except Exception as e:
-        error_logger.error(f"Error showing character cards: {e}", exc_info=True)
+        error_logger.error(f"Error showing matching cards: {e}", exc_info=True)
 
 
 # ============================================================
@@ -242,15 +241,11 @@ async def show_character_cards(update: Update, character_name: str) -> None:
 # ============================================================
 
 def register_inline_handlers(application: Application) -> None:
-    """
-    Register inline query handlers with the application.
-    """
+    """Register inline query handlers."""
     application.add_handler(InlineQueryHandler(inline_query_handler))
     app_logger.info("✅ Inline search handlers registered")
 
 
 def register_inline_callback_handlers(application: Application) -> None:
-    """
-    Placeholder for callback handlers (not needed for basic inline).
-    """
+    """Placeholder for compatibility."""
     pass
