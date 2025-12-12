@@ -1,11 +1,10 @@
 # ============================================================
 # 📁 File: commands/inline_search.py
 # 📍 Location: telegram_card_bot/commands/inline_search.py
-# 📝 Description: Inline search - search characters and show card images
+# 📝 Description: Inline search - shows all cards by ID order with pagination
 # ============================================================
 
 from uuid import uuid4
-from typing import List, Optional
 
 from telegram import (
     Update,
@@ -19,7 +18,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from db import db, get_unique_characters
+from db import db
 from utils.logger import app_logger, error_logger
 from utils.rarity import get_rarity_emoji
 
@@ -28,7 +27,8 @@ from utils.rarity import get_rarity_emoji
 # 📊 Constants
 # ============================================================
 
-MAX_RESULTS = 50
+# Telegram allows max 50 results per query
+RESULTS_PER_PAGE = 50
 
 
 # ============================================================
@@ -37,10 +37,11 @@ MAX_RESULTS = 50
 
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handle inline queries.
+    Handle inline queries with pagination.
     
-    - Empty query: Show all available characters (as article suggestions)
-    - With query: Search and show matching card images directly
+    - Empty query (@bot): Show all cards ordered by ID (1, 2, 3...)
+    - With query (@bot naruto): Filter cards by name/anime
+    - Supports infinite scroll via offset pagination
     """
     if not update.inline_query:
         return
@@ -48,9 +49,13 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.inline_query.query.strip()
     user = update.inline_query.from_user
     
-    app_logger.info(f"🔍 Inline: '{query}' from {user.id}")
+    # Get offset for pagination (empty string = first page)
+    offset_str = update.inline_query.offset
+    offset = int(offset_str) if offset_str else 0
     
-    # Check database
+    app_logger.info(f"🔍 Inline: '{query}' offset={offset} from {user.id}")
+    
+    # Check database connection
     if not db.is_connected:
         await update.inline_query.answer(
             results=[
@@ -67,116 +72,49 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
     
-    # ========================================
-    # Empty query - show character list
-    # ========================================
-    if not query:
-        await show_character_list(update)
-        return
-    
-    # ========================================
-    # Has query - show matching card images
-    # ========================================
-    await show_matching_cards(update, query)
-
-
-# ============================================================
-# 👤 Show Character List (Empty Query)
-# ============================================================
-
-async def show_character_list(update: Update) -> None:
-    """
-    Show list of all available character names.
-    User can tap to see the name, then type it to search.
-    """
     try:
-        characters = await get_unique_characters(None, None, MAX_RESULTS)
+        # Fetch cards from database
+        if query:
+            # Search with filter, ordered by card_id
+            search_pattern = f"%{query}%"
+            cards = await db.fetch(
+                """
+                SELECT card_id, character_name, anime, rarity, photo_file_id
+                FROM cards
+                WHERE is_active = TRUE
+                  AND (
+                    LOWER(character_name) LIKE LOWER($1)
+                    OR LOWER(anime) LIKE LOWER($1)
+                  )
+                ORDER BY card_id ASC
+                LIMIT $2 OFFSET $3
+                """,
+                search_pattern, RESULTS_PER_PAGE, offset
+            )
+        else:
+            # No query - show all cards ordered by card_id (1, 2, 3...)
+            cards = await db.fetch(
+                """
+                SELECT card_id, character_name, anime, rarity, photo_file_id
+                FROM cards
+                WHERE is_active = TRUE
+                ORDER BY card_id ASC
+                LIMIT $1 OFFSET $2
+                """,
+                RESULTS_PER_PAGE, offset
+            )
         
-        if not characters:
+        # No cards found (only show message on first page)
+        if not cards and offset == 0:
+            message = f"No cards found for '{query}'" if query else "No cards in database"
             await update.inline_query.answer(
                 results=[
                     InlineQueryResultArticle(
                         id=str(uuid4()),
-                        title="📭 No characters available",
-                        description="No cards have been uploaded yet",
+                        title="📭 No cards found",
+                        description=message,
                         input_message_content=InputTextMessageContent(
-                            message_text="No characters available"
-                        )
-                    )
-                ],
-                cache_time=60
-            )
-            return
-        
-        results = []
-        
-        for char in characters:
-            character_name = char["character_name"]
-            anime = char["anime"]
-            card_count = char["card_count"]
-            
-            result = InlineQueryResultArticle(
-                id=str(uuid4()),
-                title=f"👤 {character_name}",
-                description=f"🎬 {anime} • 🎴 {card_count} card(s) — Type name to see cards",
-                input_message_content=InputTextMessageContent(
-                    message_text=f"👤 *{character_name}*\n🎬 {anime}",
-                    parse_mode="Markdown"
-                )
-            )
-            results.append(result)
-        
-        await update.inline_query.answer(
-            results=results,
-            cache_time=120,
-            is_personal=False,
-            switch_pm_text="💡 Type a character name to see cards",
-            switch_pm_parameter="inline_help"
-        )
-        
-        app_logger.info(f"✅ Showed {len(results)} characters")
-        
-    except Exception as e:
-        error_logger.error(f"Error showing character list: {e}", exc_info=True)
-
-
-# ============================================================
-# 🎴 Show Matching Cards (With Query)
-# ============================================================
-
-async def show_matching_cards(update: Update, query: str) -> None:
-    """
-    Search for cards matching the query and show images only.
-    Searches both character names and anime names.
-    """
-    try:
-        # Search in database
-        search_pattern = f"%{query}%"
-        
-        cards = await db.fetch(
-            """
-            SELECT card_id, character_name, anime, rarity, photo_file_id
-            FROM cards
-            WHERE is_active = TRUE
-              AND (
-                LOWER(character_name) LIKE LOWER($1)
-                OR LOWER(anime) LIKE LOWER($1)
-              )
-            ORDER BY rarity DESC, character_name ASC
-            LIMIT $2
-            """,
-            search_pattern, MAX_RESULTS
-        )
-        
-        if not cards:
-            await update.inline_query.answer(
-                results=[
-                    InlineQueryResultArticle(
-                        id=str(uuid4()),
-                        title=f"🔍 No results for '{query}'",
-                        description="Try a different search term",
-                        input_message_content=InputTextMessageContent(
-                            message_text=f"No cards found for: {query}"
+                            message_text=message
                         )
                     )
                 ],
@@ -184,11 +122,13 @@ async def show_matching_cards(update: Update, query: str) -> None:
             )
             return
         
+        # Build results (images only, no caption)
         results = []
         
         for card in cards:
             photo_file_id = card.get("photo_file_id")
             
+            # Skip cards without images
             if not photo_file_id:
                 continue
             
@@ -198,42 +138,47 @@ async def show_matching_cards(update: Update, query: str) -> None:
             rarity = card.get("rarity", 1)
             rarity_emoji = get_rarity_emoji(rarity)
             
-            # Image only - empty caption
             result = InlineQueryResultCachedPhoto(
                 id=str(uuid4()),
                 photo_file_id=photo_file_id,
                 title=f"{rarity_emoji} {character_name}",
                 description=f"🎬 {anime} • #{card_id}",
-                caption="",  # No caption = image only
+                caption="",  # Empty = image only
             )
             results.append(result)
         
-        if not results:
-            await update.inline_query.answer(
-                results=[
-                    InlineQueryResultArticle(
-                        id=str(uuid4()),
-                        title=f"❌ No images for '{query}'",
-                        description="Cards found but no images available",
-                        input_message_content=InputTextMessageContent(
-                            message_text=f"No card images for: {query}"
-                        )
-                    )
-                ],
-                cache_time=30
-            )
-            return
+        # Calculate next offset for pagination
+        # If we got full page, there might be more
+        if len(cards) == RESULTS_PER_PAGE:
+            next_offset = str(offset + RESULTS_PER_PAGE)
+        else:
+            next_offset = ""  # No more results
         
+        # Send results
         await update.inline_query.answer(
             results=results,
             cache_time=60,
-            is_personal=False
+            is_personal=False,
+            next_offset=next_offset  # Enables infinite scroll
         )
         
-        app_logger.info(f"✅ Showed {len(results)} cards for '{query}'")
+        app_logger.info(f"✅ Returned {len(results)} cards, next_offset={next_offset}")
         
     except Exception as e:
-        error_logger.error(f"Error showing matching cards: {e}", exc_info=True)
+        error_logger.error(f"Inline search error: {e}", exc_info=True)
+        await update.inline_query.answer(
+            results=[
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="❌ Error",
+                    description="Something went wrong",
+                    input_message_content=InputTextMessageContent(
+                        message_text="❌ An error occurred"
+                    )
+                )
+            ],
+            cache_time=10
+        )
 
 
 # ============================================================
