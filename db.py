@@ -2100,3 +2100,93 @@ async def execute_trade(
         error_logger.error(f"Error executing trade: {e}", exc_info=True)
         await update_trade_status(None, trade_id, "failed")
         return False, f"Trade execution failed: {str(e)}"
+
+
+# ============================================================
+# 🔍 Inline Search Functions
+# ============================================================
+
+async def get_unique_characters(
+    pool: Optional[Pool],
+    search_term: Optional[str] = None,
+    limit: int = 50
+) -> List[Record]:
+    """
+    Get unique character names for inline search suggestions.
+    
+    Args:
+        pool: Database pool
+        search_term: Optional search filter
+        limit: Maximum results
+        
+    Returns:
+        List of unique character records
+    """
+    if not db.is_connected:
+        return []
+
+    try:
+        if search_term:
+            query = """
+                SELECT DISTINCT character_name, anime, 
+                       MIN(card_id) as sample_card_id,
+                       COUNT(*) as card_count
+                FROM cards
+                WHERE is_active = TRUE
+                  AND (
+                    LOWER(character_name) LIKE LOWER($1)
+                    OR LOWER(anime) LIKE LOWER($1)
+                  )
+                GROUP BY character_name, anime
+                ORDER BY character_name ASC
+                LIMIT $2
+            """
+            return await db.fetch(query, f"%{search_term}%", limit)
+        else:
+            query = """
+                SELECT DISTINCT character_name, anime,
+                       MIN(card_id) as sample_card_id,
+                       COUNT(*) as card_count
+                FROM cards
+                WHERE is_active = TRUE
+                GROUP BY character_name, anime
+                ORDER BY character_name ASC
+                LIMIT $1
+            """
+            return await db.fetch(query, limit)
+    except Exception as e:
+        error_logger.error(f"Error getting unique characters: {e}")
+        return []
+
+
+async def get_cards_by_character(
+    pool: Optional[Pool],
+    character_name: str,
+    limit: int = 50
+) -> List[Record]:
+    """
+    Get all cards for a specific character.
+    
+    Args:
+        pool: Database pool
+        character_name: Exact character name
+        limit: Maximum results
+        
+    Returns:
+        List of card records
+    """
+    if not db.is_connected:
+        return []
+
+    try:
+        query = """
+            SELECT * FROM cards
+            WHERE is_active = TRUE
+              AND LOWER(character_name) = LOWER($1)
+            ORDER BY rarity DESC
+            LIMIT $2
+        """
+        return await db.fetch(query, character_name, limit)
+    except Exception as e:
+        error_logger.error(f"Error getting cards by character: {e}")
+        return []
