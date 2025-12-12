@@ -166,7 +166,7 @@ def create_drop_caption(rarity: int, group_name: str) -> str:
         f"📍 *{styled_group}*\n"
         f"✨ Rarity: *{rarity_name}*\n\n"
         f"🎯 Catch with:\n"
-        f"`/lulucatch <name>`"
+        f"/lulucatch"
     )
 
 def create_catch_success_message(user_name: str, user_id: int, character_name: str, anime: str, rarity: int, is_new: bool = True) -> str:
