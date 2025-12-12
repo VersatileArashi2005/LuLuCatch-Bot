@@ -82,6 +82,17 @@ from commands.cardinfo import register_cardinfo_handlers
 from commands.trade import register_trade_handlers
 from commands.leaderboard import register_leaderboard_handlers
 
+# Import drop system handlers
+from handlers.drop import (
+    setdrop_handler,
+    droptime_handler,
+    lulucatch_handler,
+    forcedrop_handler,
+    cleardrop_handler,
+    dropstats_handler,
+    message_counter,
+)
+
 # ============================================================
 # 🤖 Telegram Bot Application
 # ============================================================
