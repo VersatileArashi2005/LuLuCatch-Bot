@@ -20,7 +20,7 @@ except ImportError:
 from config import Config
 from db import db
 from utils.logger import app_logger, error_logger, log_command
-from utils.rarity import RARITY_TABLE, get_rarity_emoji, rarity_to_text, roll_rarity
+from utils.rarity import RARITY_TABLE, get_rarity_emoji, rarity_to_text, get_random_rarity
 
 class TextStyle:
     SMALL_CAPS = {'a': 'ᴀ', 'b': 'ʙ', 'c': 'ᴄ', 'd': 'ᴅ', 'e': 'ᴇ', 'f': 'ꜰ', 'g': 'ɢ', 'h': 'ʜ', 'i': 'ɪ', 'j': 'ᴊ', 'k': 'ᴋ', 'l': 'ʟ', 'm': 'ᴍ', 'n': 'ɴ', 'o': 'ᴏ', 'p': 'ᴘ', 'q': 'ǫ', 'r': 'ʀ', 's': 'ꜱ', 't': 'ᴛ', 'u': 'ᴜ', 'v': 'ᴠ', 'w': 'ᴡ', 'x': 'x', 'y': 'ʏ', 'z': 'ᴢ'}
@@ -88,7 +88,7 @@ async def reset_message_count(group_id: int) -> bool:
 
 async def get_random_card_for_drop() -> Optional[Dict[str, Any]]:
     try:
-        rarity = roll_rarity()
+        rarity = get_random_rarity()
         card = await db.fetchrow("SELECT card_id, character_name, anime, rarity, photo_file_id FROM cards WHERE rarity = $1 AND is_active = TRUE ORDER BY RANDOM() LIMIT 1", rarity)
         if not card:
             card = await db.fetchrow("SELECT card_id, character_name, anime, rarity, photo_file_id FROM cards WHERE is_active = TRUE ORDER BY RANDOM() LIMIT 1")
