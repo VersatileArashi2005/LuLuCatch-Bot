@@ -754,3 +754,241 @@ async def spawn_card_drop(
     except Exception as e:
         error_logger.error(f"Unexpected error in spawn_card_drop: {e}", exc_info=True)
         return False
+
+
+# ============================================================
+# 🎯 Command: /lulucatch - Catch the Character
+# ============================================================
+
+async def lulucatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /lulucatch command - Attempt to catch a dropped character."""
+    user = update.effective_user
+    chat = update.effective_chat
+    message = update.message
+    
+    log_command(user.id, "lulucatch", chat.id)
+    
+    # Check if in group
+    if chat.type not in ["group", "supergroup"]:
+        await message.reply_text(
+            f"❌ {TextStyle.to_small_caps('this command only works in groups')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Check if there's an active drop
+    drop = active_drops.get(chat.id)
+    
+    if not drop:
+        await message.reply_text(
+            f"❌ {TextStyle.to_small_caps('no active drop right now')}!\n\n"
+            f"💡 {TextStyle.to_small_caps('wait for a character to appear')}...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Check if already caught
+    if drop.get("caught_by"):
+        catcher_id = drop["caught_by"]["user_id"]
+        catcher_name = drop["caught_by"]["first_name"]
+        character_name = drop["card"]["character_name"]
+        
+        await message.reply_text(
+            create_already_caught_message(catcher_name, catcher_id, character_name),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Check if drop expired
+    spawned_at = drop.get("spawned_at")
+    if spawned_at and (datetime.now() - spawned_at).seconds >= DROP_TIMEOUT:
+        # Remove expired drop
+        del active_drops[chat.id]
+        
+        await message.reply_text(
+            f"⏰ {TextStyle.to_small_caps('this drop has expired')}!\n\n"
+            f"💨 {TextStyle.to_small_caps('the character ran away')}...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Get the guessed name
+    if not context.args:
+        await message.reply_text(
+            f"❌ {TextStyle.to_small_caps('please provide the character name')}!\n\n"
+            f"📝 *ᴜꜱᴀɢᴇ:* `/lulucatch <character name>`\n"
+            f"📌 *ᴇxᴀᴍᴘʟᴇ:* `/lulucatch Yumeko`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    guess = " ".join(context.args).strip()
+    actual_name = drop["card"]["character_name"]
+    
+    # Check name match
+    is_match, similarity = check_name_match(guess, actual_name)
+    
+    if not is_match:
+        # Wrong guess
+        hint_msg = create_wrong_guess_message(similarity)
+        
+        await message.reply_text(
+            hint_msg,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # ✅ Successful catch!
+    card = drop["card"]
+    card_id = card["card_id"]
+    character_name = card["character_name"]
+    anime = card["anime"]
+    rarity = card["rarity"]
+    
+    # Mark as caught
+    drop["caught_by"] = {
+        "user_id": user.id,
+        "first_name": user.first_name,
+    }
+    
+    # Record in database
+    success = await record_catch(
+        user_id=user.id,
+        card_id=card_id,
+        group_id=chat.id,
+        username=user.username,
+        first_name=user.first_name
+    )
+    
+    if not success:
+        await message.reply_text(
+            f"❌ {TextStyle.to_small_caps('error saving catch. please try again.')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        # Reset caught status
+        drop["caught_by"] = None
+        return
+    
+    # Check if this is a new card for the user
+    existing = await db.fetchval(
+        """
+        SELECT COUNT(*) FROM collections 
+        WHERE user_id = $1 AND card_id = $2
+        """,
+        user.id, card_id
+    )
+    is_new = (existing == 1)  # Just added, so count is 1
+    
+    # Create success message
+    success_msg = create_catch_success_message(
+        user_name=user.first_name,
+        user_id=user.id,
+        character_name=character_name,
+        anime=anime,
+        rarity=rarity,
+        is_new=is_new
+    )
+    
+    # Send success message
+    await message.reply_text(
+        success_msg,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Add reaction to user's message
+    try:
+        reaction_emoji = get_catch_reaction(rarity)
+        await message.set_reaction(
+            reaction=[ReactionTypeEmoji(emoji=reaction_emoji)]
+        )
+    except TelegramError as e:
+        # Reactions might not be available in all groups
+        app_logger.debug(f"Could not set reaction: {e}")
+    except Exception as e:
+        app_logger.debug(f"Reaction error: {e}")
+    
+    # Update the original drop message to show it's caught
+    try:
+        rarity_emoji = get_rarity_emoji(rarity)
+        caught_caption = (
+            f"{rarity_emoji} *ᴄᴀᴜɢʜᴛ!* {rarity_emoji}\n\n"
+            f"╭─────────────────────────╮\n"
+            f"│  🎴 *{character_name}*\n"
+            f"│  📺 _{anime}_\n"
+            f"│\n"
+            f"│  👤 ᴄᴀᴜɢʜᴛ ʙʏ:\n"
+            f"│  [{user.first_name}](tg://user?id={user.id})\n"
+            f"╰─────────────────────────╯"
+        )
+        
+        await context.bot.edit_message_caption(
+            chat_id=chat.id,
+            message_id=drop["message_id"],
+            caption=caught_caption,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except TelegramError as e:
+        app_logger.debug(f"Could not edit drop message: {e}")
+    
+    # Remove from active drops after a short delay
+    # (keep it for a bit so late catchers get the "already caught" message)
+    async def cleanup_drop():
+        await asyncio.sleep(30)  # Keep for 30 seconds
+        if chat.id in active_drops and active_drops[chat.id].get("caught_by"):
+            del active_drops[chat.id]
+    
+    asyncio.create_task(cleanup_drop())
+    
+    app_logger.info(
+        f"🎯 {user.first_name} ({user.id}) caught {character_name} "
+        f"(Card ID: {card_id}, Rarity: {rarity}) in group {chat.id}"
+    )
+
+
+# ============================================================
+# 💬 Message Handler - Count Messages & Trigger Drops
+# ============================================================
+
+async def message_counter_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Count messages in groups and trigger drops when threshold is reached."""
+    # Ignore if not in group
+    if not update.effective_chat:
+        return
+    
+    chat = update.effective_chat
+    
+    if chat.type not in ["group", "supergroup"]:
+        return
+    
+    # Ignore bot messages
+    if update.effective_user and update.effective_user.is_bot:
+        return
+    
+    # Ignore commands (they shouldn't count towards drop)
+    if update.message and update.message.text and update.message.text.startswith('/'):
+        return
+    
+    try:
+        # Ensure group exists
+        await ensure_group_exists(chat.id, chat.title)
+        
+        # Increment message count
+        new_count = await increment_message_count(chat.id)
+        
+        # Get threshold
+        settings = await get_group_drop_settings(chat.id)
+        threshold = settings["threshold"]
+        
+        # Check if we should trigger a drop
+        if new_count >= threshold:
+            # Trigger drop!
+            success = await spawn_card_drop(context, chat.id, chat.title)
+            
+            if success:
+                app_logger.info(
+                    f"🎴 Auto-drop triggered in group {chat.id} "
+                    f"(messages: {new_count}/{threshold})"
+                )
+    
+    except Exception as e:
+        error_logger.error(f"Error in message counter: {e}", exc_info=True)
