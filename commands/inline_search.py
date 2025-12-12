@@ -55,9 +55,9 @@ def format_card_caption(
         owner_text = f"👥 {owner_count} collectors own this"
     
     caption = (
-        f"┏━━━━━━━━━━━━━━━━━━━━┓\n"
+        f"┏━━━━━━━━━━━━━━━━━━┓\n"
         f"   🎴 *CARD DISCOVERED!*\n"
-        f"┗━━━━━━━━━━━━━━━━━━━━┛\n\n"
+        f"┗━━━━━━━━━━━━━━━━━━┛\n\n"
         f"🆔 *Card:* `#{card_id}` — {character_name}\n"
         f"🎬 *Anime:* {anime}\n"
         f"✨ *Rarity:* {rarity_name} {rarity_emoji}\n\n"
