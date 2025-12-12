@@ -351,6 +351,9 @@ async def setup_bot() -> Application:
     register_trade_handlers(application)
     register_leaderboard_handlers(application)
 
+    # Register role handlers
+    register_role_handlers(application)
+
     # ========================================
     # Error Handler
     # ========================================
