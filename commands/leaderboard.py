@@ -1,7 +1,7 @@
 # ============================================================
 # 📁 File: commands/leaderboard.py
 # 📍 Location: telegram_card_bot/commands/leaderboard.py
-# 📝 Description: Leaderboard and global statistics
+# 📝 Description: Modern leaderboard with multiple categories
 # ============================================================
 
 from typing import Optional, List
@@ -22,28 +22,67 @@ from config import Config
 from db import (
     db,
     get_global_stats,
-    get_rarity_distribution,
     get_top_catchers,
+    ensure_user,
 )
 from utils.logger import app_logger, error_logger, log_command
-from utils.rarity import rarity_to_text, RARITY_TABLE
+from utils.constants import (
+    MEDALS,
+    Pagination,
+    ButtonLabels,
+    get_medal,
+    format_number,
+)
+from utils.ui import format_bot_stats
 
 
 # ============================================================
 # 📊 Constants
 # ============================================================
 
-LEADERBOARD_PAGE_SIZE = 10  # Users per page
+PAGE_SIZE = Pagination.LEADERBOARD_PER_PAGE
+
+# Leaderboard types configuration
+LEADERBOARD_TYPES = {
+    "catches": {
+        "title": "🎯 Top Catchers",
+        "emoji": "🎯",
+        "field": "total_catches",
+        "label": "catches",
+        "description": "Most cards caught"
+    },
+    "cards": {
+        "title": "🎴 Biggest Collections",
+        "emoji": "🎴",
+        "field": "total_catches",  # Using catches as proxy
+        "label": "cards",
+        "description": "Largest collections"
+    },
+    "coins": {
+        "title": "💰 Richest Players",
+        "emoji": "💰",
+        "field": "coins",
+        "label": "coins",
+        "description": "Most coins earned"
+    },
+    "level": {
+        "title": "⭐ Highest Levels",
+        "emoji": "⭐",
+        "field": "level",
+        "label": "level",
+        "description": "Highest player levels"
+    }
+}
 
 
 # ============================================================
-# 🏆 Leaderboard Command Handler
+# 🏆 Leaderboard Command
 # ============================================================
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle /leaderboard command.
-    Shows top users by total catches with pagination.
+    Shows top users with category switching.
     """
     if not update.message or not update.effective_user:
         return
@@ -51,139 +90,192 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = update.effective_user
     log_command(user.id, "leaderboard", update.effective_chat.id)
 
-    # Check DB connection
+    # Ensure user exists
+    await ensure_user(
+        pool=None,
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name
+    )
+
+    # Check database
     if not db.is_connected:
         await update.message.reply_text(
-            "⚠️ Database is currently offline. Please try again later.",
+            "⚠️ Database offline. Try again later.",
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
-    # Parse arguments (optional: by=total or by=rarity:X)
-    leaderboard_type = "total"  # Default
-    page = 1
-
+    # Parse arguments for type
+    lb_type = "catches"  # Default
+    
     if context.args:
-        for arg in context.args:
-            if arg.startswith("by="):
-                leaderboard_type = arg.split("=")[1]
-            elif arg.startswith("page="):
-                try:
-                    page = int(arg.split("=")[1])
-                except ValueError:
-                    page = 1
+        arg = context.args[0].lower()
+        if arg in LEADERBOARD_TYPES:
+            lb_type = arg
 
     # Show leaderboard
-    await show_leaderboard_page(update, context, leaderboard_type, page)
+    await show_leaderboard(
+        update=update,
+        context=context,
+        lb_type=lb_type,
+        page=1
+    )
 
 
-async def show_leaderboard_page(
+# ============================================================
+# 📄 Display Leaderboard
+# ============================================================
+
+async def show_leaderboard(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-    leaderboard_type: str = "total",
+    lb_type: str = "catches",
     page: int = 1,
     from_callback: bool = False
 ) -> None:
-    """
-    Display a paginated leaderboard.
+    """Display leaderboard with modern UI."""
     
-    Args:
-        update: Telegram update
-        context: Bot context
-        leaderboard_type: Type of leaderboard (total, rarity:X)
-        page: Page number (1-indexed)
-        from_callback: Whether this is from a callback
-    """
-    # Get top catchers
-    # For now, we'll implement "total catches" leaderboard
-    # You can extend this to support rarity-specific leaderboards
+    type_config = LEADERBOARD_TYPES.get(lb_type, LEADERBOARD_TYPES["catches"])
+    
+    # Get top users
+    try:
+        if lb_type == "coins":
+            users = await db.fetch(
+                """
+                SELECT user_id, username, first_name, coins, level, total_catches
+                FROM users
+                WHERE is_banned = FALSE AND coins > 0
+                ORDER BY coins DESC
+                LIMIT 100
+                """
+            )
+        elif lb_type == "level":
+            users = await db.fetch(
+                """
+                SELECT user_id, username, first_name, coins, level, total_catches
+                FROM users
+                WHERE is_banned = FALSE AND level > 1
+                ORDER BY level DESC, xp DESC
+                LIMIT 100
+                """
+            )
+        else:
+            # catches or cards
+            users = await db.fetch(
+                """
+                SELECT user_id, username, first_name, coins, level, total_catches
+                FROM users
+                WHERE is_banned = FALSE AND total_catches > 0
+                ORDER BY total_catches DESC
+                LIMIT 100
+                """
+            )
+    except Exception as e:
+        error_logger.error(f"Leaderboard query error: {e}")
+        users = []
 
-    offset = (page - 1) * LEADERBOARD_PAGE_SIZE
-    limit = LEADERBOARD_PAGE_SIZE
-
-    # Get top users (simplified - uses existing function)
-    top_users = await get_top_catchers(None, limit=100)  # Get top 100
-
-    if not top_users:
+    # Empty leaderboard
+    if not users:
         text = (
-            "🏆 *Leaderboard*\n\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "No users yet!\n"
-            "━━━━━━━━━━━━━━━━━━━━"
+            f"{type_config['title']}\n\n"
+            f"No players yet!\n"
+            f"Start catching cards to appear here."
         )
-
+        
+        keyboard = build_leaderboard_keyboard(lb_type, 1, 1)
+        
         if from_callback and update.callback_query:
             await update.callback_query.edit_message_text(
                 text=text,
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=keyboard
             )
             await update.callback_query.answer()
         else:
-            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=keyboard
+            )
         return
 
-    # Calculate pagination
-    total_users = len(top_users)
-    total_pages = (total_users + LEADERBOARD_PAGE_SIZE - 1) // LEADERBOARD_PAGE_SIZE
+    # Pagination
+    total_users = len(users)
+    total_pages = max(1, (total_users + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(1, min(page, total_pages))
+    
+    start_idx = (page - 1) * PAGE_SIZE
+    end_idx = min(start_idx + PAGE_SIZE, total_users)
+    page_users = users[start_idx:end_idx]
 
-    # Get users for this page
-    start_idx = offset
-    end_idx = min(offset + LEADERBOARD_PAGE_SIZE, total_users)
-    page_users = top_users[start_idx:end_idx]
+    # Find viewer's rank
+    viewer_id = update.callback_query.from_user.id if from_callback else update.effective_user.id
+    viewer_rank = None
+    for i, u in enumerate(users, 1):
+        if u["user_id"] == viewer_id:
+            viewer_rank = i
+            break
 
     # Build leaderboard text
-    leaderboard_lines = []
+    lines = [f"*{type_config['title']}*\n"]
 
-    for idx, user_record in enumerate(page_users, start=start_idx + 1):
-        user_id = user_record.get("user_id")
-        first_name = user_record.get("first_name", "Unknown")
-        username = user_record.get("username")
-        total_catches = user_record.get("total_catches", 0)
-        level = user_record.get("level", 1)
-
-        # Medal for top 3
-        if idx == 1:
-            medal = "🥇"
-        elif idx == 2:
-            medal = "🥈"
-        elif idx == 3:
-            medal = "🥉"
+    for idx, user_record in enumerate(page_users):
+        rank = start_idx + idx + 1
+        medal = get_medal(rank)
+        
+        # User display name
+        name = user_record.get("first_name") or user_record.get("username") or "Unknown"
+        if len(name) > 15:
+            name = name[:14] + "…"
+        
+        # Get value based on type
+        if lb_type == "coins":
+            value = user_record.get("coins", 0)
+            value_text = f"💰 {format_number(value)}"
+        elif lb_type == "level":
+            level = user_record.get("level", 1)
+            value_text = f"⭐ Lv.{level}"
         else:
-            medal = f"{idx}."
-
-        # Username display
-        if username:
-            user_display = f"@{username}"
+            catches = user_record.get("total_catches", 0)
+            value_text = f"🎯 {format_number(catches)}"
+        
+        # Highlight viewer
+        if user_record["user_id"] == viewer_id:
+            lines.append(f"{medal} *{name}* ← You\n     {value_text}")
         else:
-            user_display = f"{first_name}"
+            lines.append(f"{medal} {name}\n     {value_text}")
 
-        leaderboard_lines.append(
-            f"{medal} *{user_display}*\n"
-            f"   🎯 {total_catches:,} catches • ⭐ Lv.{level}"
-        )
+    leaderboard_text = "\n".join(lines)
 
-    leaderboard_text = "\n\n".join(leaderboard_lines)
+    # Viewer rank footer
+    rank_text = ""
+    if viewer_rank:
+        rank_text = f"\n\n📍 Your rank: #{viewer_rank}"
+    else:
+        rank_text = "\n\n📍 Catch cards to appear here!"
 
     # Build message
     text = (
-        f"🏆 *Top Catchers Leaderboard*\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"{leaderboard_text}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{leaderboard_text}"
+        f"{rank_text}\n\n"
         f"📄 Page {page}/{total_pages}"
     )
 
-    # Build pagination keyboard
-    keyboard = build_leaderboard_keyboard(leaderboard_type, page, total_pages)
+    # Build keyboard
+    keyboard = build_leaderboard_keyboard(lb_type, page, total_pages)
 
-    # Send or edit message
+    # Send or edit
     if from_callback and update.callback_query:
-        await update.callback_query.edit_message_text(
-            text=text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=keyboard
-        )
+        try:
+            await update.callback_query.edit_message_text(
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=keyboard
+            )
+        except Exception:
+            pass
         await update.callback_query.answer()
     else:
         await update.message.reply_text(
@@ -193,102 +285,145 @@ async def show_leaderboard_page(
         )
 
 
+# ============================================================
+# ⌨️ Keyboard Builder
+# ============================================================
+
 def build_leaderboard_keyboard(
-    leaderboard_type: str,
+    current_type: str,
     page: int,
     total_pages: int
 ) -> InlineKeyboardMarkup:
-    """
-    Build pagination keyboard for leaderboard.
+    """Build leaderboard keyboard with type switching and pagination."""
     
-    Args:
-        leaderboard_type: Type of leaderboard
-        page: Current page
-        total_pages: Total pages
-        
-    Returns:
-        InlineKeyboardMarkup with navigation buttons
-    """
     buttons = []
 
-    # Navigation row
-    nav_buttons = []
+    # Row 1: Type selector
+    type_row = []
+    for type_key, type_config in LEADERBOARD_TYPES.items():
+        emoji = type_config["emoji"]
+        if type_key == current_type:
+            label = f"{emoji} ✓"
+        else:
+            label = emoji
+        
+        type_row.append(
+            InlineKeyboardButton(
+                label,
+                callback_data=f"lb:{type_key}:1"
+            )
+        )
+    buttons.append(type_row)
 
+    # Row 2: Navigation
+    nav_row = []
+    
     if page > 1:
-        nav_buttons.append(
-            InlineKeyboardButton("⬅️ Prev", callback_data=f"leader:{leaderboard_type}:{page-1}")
+        nav_row.append(
+            InlineKeyboardButton(
+                ButtonLabels.PREV,
+                callback_data=f"lb:{current_type}:{page - 1}"
+            )
         )
-
-    nav_buttons.append(
-        InlineKeyboardButton(f"📄 {page}/{total_pages}", callback_data="noop")
+    
+    nav_row.append(
+        InlineKeyboardButton(
+            f"{page}/{total_pages}",
+            callback_data="noop"
+        )
     )
-
+    
     if page < total_pages:
-        nav_buttons.append(
-            InlineKeyboardButton("Next ➡️", callback_data=f"leader:{leaderboard_type}:{page+1}")
+        nav_row.append(
+            InlineKeyboardButton(
+                ButtonLabels.NEXT,
+                callback_data=f"lb:{current_type}:{page + 1}"
+            )
         )
+    
+    buttons.append(nav_row)
 
-    buttons.append(nav_buttons)
-
-    # Close button
+    # Row 3: Refresh & Close
     buttons.append([
-        InlineKeyboardButton("❌ Close", callback_data="close")
+        InlineKeyboardButton(
+            ButtonLabels.REFRESH,
+            callback_data=f"lb:{current_type}:{page}"
+        ),
+        InlineKeyboardButton(
+            ButtonLabels.CLOSE,
+            callback_data="lb_close"
+        )
     ])
 
     return InlineKeyboardMarkup(buttons)
 
 
 # ============================================================
-# 🔘 Leaderboard Callback Handler
+# 🔘 Callback Handler
 # ============================================================
 
 async def leaderboard_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle leaderboard pagination callbacks.
+    """Handle leaderboard callbacks."""
     
-    Pattern: leader:{type}:{page}
-    """
     query = update.callback_query
-
     if not query or not query.data:
         return
 
-    # Handle noop
-    if query.data == "noop":
+    data = query.data
+
+    # Noop
+    if data == "noop":
         await query.answer()
         return
 
-    # Handle close
-    if query.data == "close":
-        await query.message.delete()
-        await query.answer("Closed")
+    # Close
+    if data == "lb_close":
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await query.answer()
         return
 
-    # Parse callback data
-    try:
-        parts = query.data.split(":")
-        if parts[0] != "leader":
-            return
-
-        leaderboard_type = parts[1]
-        page = int(parts[2])
-
-    except (ValueError, IndexError):
-        await query.answer("Invalid data", show_alert=True)
+    # Navigation/Type switch: lb:{type}:{page}
+    if data.startswith("lb:"):
+        try:
+            parts = data.split(":")
+            lb_type = parts[1]
+            page = int(parts[2])
+            
+            if lb_type not in LEADERBOARD_TYPES:
+                lb_type = "catches"
+            
+            await show_leaderboard(
+                update=update,
+                context=context,
+                lb_type=lb_type,
+                page=page,
+                from_callback=True
+            )
+        except (ValueError, IndexError):
+            await query.answer("Error", show_alert=True)
         return
-
-    # Show the requested page
-    await show_leaderboard_page(update, context, leaderboard_type, page, from_callback=True)
 
 
 # ============================================================
-# 📊 Stats Command Handler (Admin Only)
+# 📊 Top Command (Alias)
+# ============================================================
+
+async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Alias for /leaderboard."""
+    await leaderboard_command(update, context)
+
+
+# ============================================================
+# 📈 Stats Command (Bot Statistics)
 # ============================================================
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle /stats command.
-    Shows global bot statistics (admin only).
+    Shows global bot statistics.
     """
     if not update.message or not update.effective_user:
         return
@@ -296,53 +431,56 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     log_command(user.id, "stats", update.effective_chat.id)
 
-    # Check admin permission
-    if not Config.is_admin(user.id):
-        await update.message.reply_text(
-            "❌ This command is for admins only.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-
-    # Check DB connection
     if not db.is_connected:
         await update.message.reply_text(
-            "⚠️ Database is currently offline.",
+            "⚠️ Database offline.",
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
-    # Get global stats
-    global_stats = await get_global_stats(None)
-
-    # Get rarity distribution
-    rarity_dist = await get_rarity_distribution(None)
-
-    # Build rarity distribution text
-    rarity_lines = []
-    for row in rarity_dist:
-        rarity_id = row.get("rarity", 1)
-        count = row.get("count", 0)
-        
-        rarity_name, rarity_prob, rarity_emoji = rarity_to_text(rarity_id)
-        
-        rarity_lines.append(f"  {rarity_emoji} {rarity_name}: {count}")
-
-    rarity_text = "\n".join(rarity_lines) if rarity_lines else "  None"
-
-    # Build message
+    # Get stats
+    stats = await get_global_stats(None)
+    
     text = (
-        "📊 *Global Bot Statistics*\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"👥 *Total Users:* {global_stats['total_users']:,}\n"
-        f"🎴 *Total Cards:* {global_stats['total_cards']:,}\n"
-        f"🎯 *Total Catches:* {global_stats['total_catches']:,}\n"
-        f"💬 *Active Groups:* {global_stats['active_groups']:,}\n\n"
-        f"✨ *Rarity Distribution:*\n{rarity_text}\n"
-        "━━━━━━━━━━━━━━━━━━━━"
+        f"📊 *LuLuCatch Statistics*\n\n"
+        f"👥 *Players:* {format_number(stats.get('total_users', 0))}\n"
+        f"🎴 *Cards:* {format_number(stats.get('total_cards', 0))}\n"
+        f"🎯 *Total Catches:* {format_number(stats.get('total_catches', 0))}\n"
+        f"💬 *Active Groups:* {format_number(stats.get('active_groups', 0))}\n"
     )
 
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    # Add rarity breakdown if admin
+    if Config.is_admin(user.id):
+        try:
+            rarity_stats = await db.fetch(
+                """
+                SELECT rarity, COUNT(*) as count
+                FROM cards
+                WHERE is_active = TRUE
+                GROUP BY rarity
+                ORDER BY rarity DESC
+                """
+            )
+            
+            if rarity_stats:
+                from utils.rarity import rarity_to_text
+                text += "\n📈 *Cards by Rarity*\n"
+                for row in rarity_stats:
+                    _, _, emoji = rarity_to_text(row["rarity"])
+                    text += f"{emoji} {row['count']} cards\n"
+        except Exception:
+            pass
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🏆 Leaderboard", callback_data="lb:catches:1"),
+        InlineKeyboardButton(ButtonLabels.CLOSE, callback_data="lb_close")
+    ]])
+
+    await update.message.reply_text(
+        text=text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard
+    )
 
 
 # ============================================================
@@ -350,19 +488,20 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ============================================================
 
 def register_leaderboard_handlers(application: Application) -> None:
-    """
-    Register leaderboard and stats handlers.
+    """Register leaderboard and stats handlers."""
     
-    Args:
-        application: Telegram bot application
-    """
-    # Command handlers
+    # Commands
     application.add_handler(CommandHandler("leaderboard", leaderboard_command))
+    application.add_handler(CommandHandler("top", top_command))
+    application.add_handler(CommandHandler("lb", leaderboard_command))  # Short alias
     application.add_handler(CommandHandler("stats", stats_command))
 
-    # Callback query handlers
+    # Callbacks
     application.add_handler(
-        CallbackQueryHandler(leaderboard_callback_handler, pattern=r"^leader:")
+        CallbackQueryHandler(leaderboard_callback_handler, pattern=r"^lb:")
+    )
+    application.add_handler(
+        CallbackQueryHandler(leaderboard_callback_handler, pattern=r"^lb_")
     )
 
     app_logger.info("✅ Leaderboard handlers registered")
