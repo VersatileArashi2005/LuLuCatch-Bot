@@ -45,7 +45,7 @@ from utils.constants import (
 # ⚙️ Configuration
 # ============================================================
 
-DEFAULT_DROP_THRESHOLD = 50
+DEFAULT_DROP_THRESHOLD = 90
 MIN_DROP_THRESHOLD = 10
 MAX_DROP_THRESHOLD = 500
 DROP_TIMEOUT = 300  # 5 minutes
@@ -303,13 +303,13 @@ def format_drop_message(card: Dict[str, Any], group_name: Optional[str] = None) 
             f"✨ *A rare character appeared!* ✨\n\n"
             f"{emoji} {rarity_name}\n"
             f"📍 {group_display}\n\n"
-            f"🎯 Type `/lulucatch <name>` to catch!"
+            f"🎯 Type `/lulucatch` to catch!"
         )
     else:
         return (
             f"🎴 *A character appeared!*\n\n"
             f"{emoji} {rarity_name}\n\n"
-            f"🎯 Type `/lulucatch <name>` to catch!"
+            f"🎯 Type `/lulucatch` to catch!"
         )
 
 
