@@ -11,7 +11,15 @@ Uses inline keyboards and Telegram formatting.
 """
 
 from typing import Optional, List, Tuple, Any
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReactionTypeEmoji
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+# Handle ReactionTypeEmoji import for backward compatibility
+try:
+    from telegram import ReactionTypeEmoji
+    REACTIONS_SUPPORTED = True
+except ImportError:
+    ReactionTypeEmoji = None
+    REACTIONS_SUPPORTED = False
 
 from utils.constants import (
     RARITY_EMOJIS,
@@ -543,7 +551,7 @@ def build_leaderboard_keyboard(
 # 🎉 Reaction Helpers
 # ============================================================
 
-def get_catch_reactions(rarity_id: int) -> List[ReactionTypeEmoji]:
+def get_catch_reactions(rarity_id: int) -> Optional[List]:
     """
     Get Telegram reaction objects for a catch.
     
@@ -551,8 +559,11 @@ def get_catch_reactions(rarity_id: int) -> List[ReactionTypeEmoji]:
         rarity_id: Rarity of the caught card
     
     Returns:
-        List of ReactionTypeEmoji objects
+        List of ReactionTypeEmoji objects, or None if not supported
     """
+    if not REACTIONS_SUPPORTED:
+        return None
+    
     reaction_emoji = get_catch_reaction(rarity_id)
     return [ReactionTypeEmoji(emoji=reaction_emoji)]
 
@@ -568,10 +579,15 @@ async def send_catch_reaction(message, rarity_id: int) -> bool:
     Returns:
         True if reaction was sent successfully
     """
+    if not REACTIONS_SUPPORTED:
+        return False
+    
     try:
         reactions = get_catch_reactions(rarity_id)
-        await message.set_reaction(reactions)
-        return True
+        if reactions:
+            await message.set_reaction(reactions)
+            return True
+        return False
     except Exception:
         # Reactions might not be supported in all chats
         return False
