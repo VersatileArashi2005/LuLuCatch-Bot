@@ -59,7 +59,7 @@ def get_rarity_emoji(rarity: int) -> str:
         5: "🔮",   # Epic
         6: "🧿",   # Limited Epic
         7: "🪩",   # Platinum
-        8: "💠",   # Emerald
+        8: "🎐",   # Emerald
         9: "❄️",   # Crystal
         10: "🏵️",  # Mythical
         11: "🌸",  # Legendary
