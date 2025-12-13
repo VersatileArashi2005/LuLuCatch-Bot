@@ -1,7 +1,7 @@
 # ============================================================
-# 📁 File: main.py
+# 📁 File: main.py (Part 1 of 2)
 # 📍 Location: telegram_card_bot/main.py
-# 📝 Description: FastAPI app with Telegram bot integration
+# 📝 Description: Modern bot with registration & flirty personality
 # ============================================================
 
 import asyncio
@@ -10,20 +10,18 @@ from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, Request, Response, HTTPException, status
-from telegram import Update, BotCommand
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
-    InlineQueryHandler,
     CallbackQueryHandler,
     ContextTypes,
-    filters,
 )
+from telegram.constants import ParseMode
 
 from config import Config
-from db import db, init_db, get_global_stats, get_user_collection_stats
+from db import db, init_db, get_global_stats, ensure_user, get_user_by_id
 from utils.logger import (
     app_logger,
     error_logger,
@@ -31,7 +29,9 @@ from utils.logger import (
     log_startup,
     log_shutdown,
     log_webhook,
+    log_command,
 )
+from utils.constants import format_number
 
 # ============================================================
 # 📦 Import Handlers
@@ -50,7 +50,6 @@ from handlers.admin import (
     ban_command_handler,
     unban_command_handler,
     set_bot_start_time,
-    # New admin handlers
     delete_command_handler,
     delete_card_callback_handler,
     edit_conversation_handler,
@@ -66,25 +65,14 @@ from handlers.catch import (
     view_cheaters_handler,
     battle_callback,
 )
-
-# Import inline search handlers
 from commands.inline_search import (
     register_inline_handlers,
     register_inline_callback_handlers,
 )
-
-# Import role handlers
-from handlers.roles import register_role_handlers
-
-# Import harem handlers (replaces collection)
 from commands.harem import register_harem_handlers
-
-# Import other command handlers
 from commands.cardinfo import register_cardinfo_handlers
 from commands.trade import register_trade_handlers
 from commands.leaderboard import register_leaderboard_handlers
-
-# Import drop system handlers
 from handlers.drop import (
     setdrop_handler,
     droptime_handler,
@@ -95,285 +83,434 @@ from handlers.drop import (
     message_counter,
 )
 
+# Try to import role handlers
+try:
+    from handlers.roles import register_role_handlers
+    ROLES_AVAILABLE = True
+except ImportError:
+    ROLES_AVAILABLE = False
+    def register_role_handlers(app):
+        pass
+
+
 # ============================================================
-# 🤖 Telegram Bot Application
+# 🔐 Registration Check
+# ============================================================
+
+async def is_user_registered(user_id: int) -> bool:
+    """Check if user has registered via /start."""
+    if not db.is_connected:
+        return True  # Allow if DB offline
+    
+    user = await get_user_by_id(None, user_id)
+    return user is not None
+
+
+async def require_registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Check if user is registered. Send prompt if not.
+    Returns True if registered, False if not.
+    """
+    user = update.effective_user
+    if not user:
+        return False
+    
+    if await is_user_registered(user.id):
+        return True
+    
+    # Not registered - send flirty prompt
+    bot_username = context.bot.username or Config.BOT_USERNAME
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💋 Register Now", url=f"https://t.me/{bot_username}?start=register")]
+    ])
+    
+    await update.effective_message.reply_text(
+        f"Hey there, gorgeous~ 💕\n\n"
+        f"I don't think we've met properly yet...\n"
+        f"Why don't you come say hi first?\n\n"
+        f"_Tap below to register with me~_",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard
+    )
+    
+    return False
+
+
+def registration_required(func):
+    """Decorator to require registration for commands."""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if await require_registration(update, context):
+            return await func(update, context)
+    return wrapper
+
+
+# ============================================================
+# 🤖 Bot Application
 # ============================================================
 
 bot_app: Optional[Application] = None
 
 
 async def setup_bot() -> Application:
-    """
-    Set up and configure the Telegram bot application.
-    
-    Returns:
-        Configured Application instance
-    """
-    log_startup("Setting up Telegram bot application...")
+    """Set up the Telegram bot application."""
+    log_startup("Setting up bot...")
 
-    # Build the application with token
-    application = (
-        ApplicationBuilder()
-        .token(Config.BOT_TOKEN)
-        .build()
-    )
-
-    # Set bot start time for uptime tracking
+    application = ApplicationBuilder().token(Config.BOT_TOKEN).build()
     set_bot_start_time()
 
     # ========================================
-    # Define Basic Command Handlers
+    # 💋 /start Command - Registration & Welcome
     # ========================================
 
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handler for /start command."""
+        """Welcome & registration handler."""
         if not update.message or not update.effective_user:
             return
 
         user = update.effective_user
-        db_status = "✅ Connected" if db.is_connected else "⚠️ Offline"
+        bot_username = context.bot.username or Config.BOT_USERNAME
+        
+        log_command(user.id, "start", update.effective_chat.id)
 
-        # Check for start parameters
+        # Register user
+        await ensure_user(
+            pool=None,
+            user_id=user.id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name
+        )
+
+        # Check for deep link parameters
         if context.args:
             param = context.args[0]
 
-            # Handle card view from inline
+            # Card view from inline
             if param.startswith("card_"):
                 try:
                     card_id = int(param.replace("card_", ""))
                     from db import get_card_by_id
+                    from utils.rarity import rarity_to_text
+                    from utils.constants import RARITY_EMOJIS
+                    
                     card = await get_card_by_id(None, card_id)
-
                     if card:
-                        from utils.rarity import rarity_to_text
-                        rarity_name, rarity_prob, rarity_emoji = rarity_to_text(card["rarity"])
-
+                        rarity = card["rarity"]
+                        rarity_name, prob, emoji = rarity_to_text(rarity)
+                        
                         caption = (
-                            f"{rarity_emoji} *{card['character_name']}*\n\n"
-                            f"━━━━━━━━━━━━━━━━━━━━\n"
-                            f"🎬 *Anime:* {card['anime']}\n"
-                            f"🆔 *ID:* `#{card['card_id']}`\n"
-                            f"✨ *Rarity:* {rarity_emoji} {rarity_name} ({rarity_prob}%)\n"
-                            f"📊 *Drop Rate:* {rarity_prob}%\n"
-                            f"━━━━━━━━━━━━━━━━━━━━"
+                            f"{emoji} *{card['character_name']}*\n\n"
+                            f"🎬 {card['anime']}\n"
+                            f"{emoji} {rarity_name} ({prob}%)\n"
+                            f"🆔 `#{card_id}`"
                         )
-
+                        
+                        keyboard = InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔍 Search More", switch_inline_query_current_chat="")
+                        ]])
+                        
                         if card.get("photo_file_id"):
                             await update.message.reply_photo(
                                 photo=card["photo_file_id"],
                                 caption=caption,
-                                parse_mode="Markdown"
+                                parse_mode=ParseMode.MARKDOWN,
+                                reply_markup=keyboard
                             )
                         else:
-                            await update.message.reply_text(caption, parse_mode="Markdown")
+                            await update.message.reply_text(caption, parse_mode=ParseMode.MARKDOWN)
                         return
                 except Exception as e:
-                    error_logger.error(f"Error handling card start param: {e}")
+                    error_logger.error(f"Card view error: {e}")
 
-            # Handle inline help
-            elif param == "inline_help" or param == "search":
+            # Inline help
+            elif param in ["inline_help", "search"]:
                 await update.message.reply_text(
-                    "🔍 *Inline Search Help*\n\n"
-                    "Type `@" + (context.bot.username or "bot") + " ` followed by:\n\n"
-                    "• *Anime name:* `naruto`\n"
-                    "• *Character:* `itachi`\n"
-                    "• *Rarity:* `legendary` or `💎`\n"
-                    "• *Card ID:* `#42` or `42`\n\n"
-                    "Results will appear as you type!",
-                    parse_mode="Markdown"
+                    f"🔍 *Searching for someone special?*\n\n"
+                    f"Just type `@{bot_username} ` and whisper what you're looking for~\n\n"
+                    f"_Try anime names, characters, or even_ `legendary` ✨",
+                    parse_mode=ParseMode.MARKDOWN
                 )
                 return
 
-            # Handle harem/collection from inline
-            elif param == "collection" or param == "harem":
+            # Collection/harem
+            elif param in ["collection", "harem"]:
                 await update.message.reply_text(
-                    "🎴 *Your Harem*\n\n"
-                    "Use `/harem` to view your cards!",
-                    parse_mode="Markdown"
+                    f"🎴 *Your Harem awaits~*\n\n"
+                    f"Use /harem to see all your beautiful catches 💕",
+                    parse_mode=ParseMode.MARKDOWN
                 )
                 return
+
+        # === Main Welcome Message ===
+        
+        # Build welcome keyboard
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "➕ Add me to your group",
+                    url=f"https://t.me/{bot_username}?startgroup=true"
+                )
+            ],
+            [
+                InlineKeyboardButton("📚 Help", callback_data="menu:help"),
+                InlineKeyboardButton("💬 Support", url="https://t.me/lulucatch")
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔍 Search Cards",
+                    switch_inline_query_current_chat=""
+                )
+            ],
+        ])
+
+        welcome_text = (
+            f"Hey there, {user.first_name}~ 💋\n\n"
+            f"Welcome to *LuLuCatch*... I've been waiting for you.\n\n"
+            f"I'm your personal card collector, and honey, "
+            f"I've got quite the collection to show you~\n\n"
+            f"✨ _Catch rare characters in groups_\n"
+            f"💕 _Build your own harem_\n"
+            f"🔥 _Trade with other collectors_\n\n"
+            f"Ready to play with me? Add me to a group and "
+            f"let's have some fun together~ 😘"
+        )
 
         await update.message.reply_text(
-            f"🎴 *Welcome to LuLuCatch, {user.first_name}!*\n\n"
-            f"I'm a card collection bot. Catch cards when they spawn in groups!\n\n"
-            f"📚 *Commands:*\n"
-            f"• /start - Show this message\n"
-            f"• /help - View all commands\n"
-            f"• /catch - Battle for a card\n"
-            f"• /harem - View your cards\n"
-            f"• /cardinfo <id> - Check card details\n"
-            f"• /trades - View pending trades\n"
-            f"• /leaderboard - Top collectors\n\n"
-            f"🔍 *Inline Search:*\n"
-            f"Type `@{context.bot.username} ` in any chat to search cards!\n\n"
-            f"🗄️ Database: {db_status}\n\n"
-            f"Add me to a group to start catching cards! 🚀",
-            parse_mode="Markdown"
+            welcome_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
         )
-        app_logger.info(f"📨 /start from user {user.id}")
+        
+        app_logger.info(f"💋 Welcome: {user.first_name} ({user.id})")
+
+    # ========================================
+    # 📚 /help Command
+    # ========================================
+
+    async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Help command with all commands listed."""
+        if not update.message:
+            return
+        
+        if not await require_registration(update, context):
+            return
+
+        bot_username = context.bot.username or Config.BOT_USERNAME
+        
+        await update.message.reply_text(
+            f"📚 *Let me teach you a few things~*\n\n"
+            f"*🎯 Catching*\n"
+            f"`/catch` — Battle for a wild card\n"
+            f"`/lulucatch <name>` — Catch a dropped character\n"
+            f"`/droptime` — When's the next drop?\n\n"
+            f"*🎴 Collection*\n"
+            f"`/harem` — Admire your collection\n"
+            f"`/cardinfo <id>` — Card details\n\n"
+            f"*🔄 Trading*\n"
+            f"`/trades` — Your pending trades\n"
+            f"`/offertrade` — Make someone an offer~\n\n"
+            f"*🏆 Rankings*\n"
+            f"`/leaderboard` — See who's on top\n"
+            f"`/stats` — Bot statistics\n\n"
+            f"*🔍 Inline Search*\n"
+            f"Type `@{bot_username} naruto` anywhere!\n\n"
+            f"_Need more help? Join our_ [support channel](https://t.me/lulucatch) 💕",
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True
+        )
+
+    # ========================================
+    # 📊 /info Command
+    # ========================================
 
     async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handler for /info command."""
+        """Bot info and statistics."""
         if not update.message:
+            return
+        
+        if not await require_registration(update, context):
             return
 
         if db.is_connected:
             stats = await get_global_stats(None)
+            
             await update.message.reply_text(
-                f"📊 *LuLuCatch Bot Info*\n\n"
-                f"👥 Total Users: {stats['total_users']:,}\n"
-                f"🎴 Total Cards: {stats['total_cards']:,}\n"
-                f"🎯 Total Catches: {stats['total_catches']:,}\n"
-                f"💬 Active Groups: {stats['active_groups']:,}\n\n"
-                f"🗄️ Database: ✅ Connected\n"
-                f"🔧 Version: 2.0.0 (Anti-Cheat)",
-                parse_mode="Markdown"
+                f"📊 *A little about me~*\n\n"
+                f"👥 Collectors: {format_number(stats.get('total_users', 0))}\n"
+                f"🎴 Cards: {format_number(stats.get('total_cards', 0))}\n"
+                f"🎯 Catches: {format_number(stats.get('total_catches', 0))}\n"
+                f"💬 Groups: {format_number(stats.get('active_groups', 0))}\n\n"
+                f"🔧 Version: `1.0.0`\n"
+                f"🗄️ Status: _Online & ready for you~_",
+                parse_mode=ParseMode.MARKDOWN
             )
         else:
             await update.message.reply_text(
-                f"📊 *LuLuCatch Bot Info*\n\n"
-                f"🗄️ Database: ⚠️ Not Connected\n\n"
-                f"The bot is running but database is offline.\n"
-                f"Some features may be unavailable.",
-                parse_mode="Markdown"
+                f"📊 *Something's not quite right...*\n\n"
+                f"I'm having trouble connecting right now.\n"
+                f"Give me a moment, darling~ 💕",
+                parse_mode=ParseMode.MARKDOWN
             )
 
-    async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handler for /help command."""
-        if not update.message:
+    # ========================================
+    # 🔘 Menu Callbacks
+    # ========================================
+
+    async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle menu button callbacks."""
+        query = update.callback_query
+        if not query or not query.data:
             return
+        
+        await query.answer()
+        data = query.data
+        bot_username = context.bot.username or Config.BOT_USERNAME
 
-        bot_username = context.bot.username or "LuLuCatchBot"
+        if data == "menu:help":
+            await query.edit_message_text(
+                f"📚 *Let me show you around~*\n\n"
+                f"*🎯 Catching*\n"
+                f"`/catch` — Battle for cards\n"
+                f"`/lulucatch <name>` — Catch drops\n"
+                f"`/droptime` — Next drop timer\n\n"
+                f"*🎴 Collection*\n"
+                f"`/harem` — Your collection\n"
+                f"`/cardinfo <id>` — Card info\n\n"
+                f"*🔄 Trading*\n"
+                f"`/trades` — Pending trades\n"
+                f"`/offertrade` — Offer a trade\n\n"
+                f"*🏆 Rankings*\n"
+                f"`/leaderboard` — Top collectors\n\n"
+                f"*🔍 Inline*\n"
+                f"Type `@{bot_username} ` anywhere!",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Back", callback_data="menu:back")
+                ]])
+            )
 
-        await update.message.reply_text(
-            "📚 *LuLuCatch Bot Help*\n\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "*Basic Commands:*\n"
-            "• /start - Welcome message\n"
-            "• /info - Bot statistics\n"
-            "• /help - This help message\n\n"
-            "*Catching:*\n"
-            "• /catch - Find & battle a card\n"
-            "• /lulucatch - Catch dropped card\n"
-            "• /droptime - Time until next drop\n"
-            "• Win = Card is yours! 🏆\n"
-            "• Lose = Card escapes 💀\n\n"
-            "*Collection:*\n"
-            "• /harem - View your cards\n"
-            "• /cardinfo <id> - Card details\n\n"
-            "*Trading:*\n"
-            "• /trades - View pending trades\n"
-            "• /offertrade - Offer a trade\n\n"
-            "*Leaderboard:*\n"
-            "• /leaderboard - Top collectors\n\n"
-            "*Inline Mode:*\n"
-            f"Type `@{bot_username} <query>` to search\n"
-            "━━━━━━━━━━━━━━━━━━━━",
-            parse_mode="Markdown"
-        )
+        elif data == "menu:back":
+            user = query.from_user
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "➕ Add to group",
+                        url=f"https://t.me/{bot_username}?startgroup=true"
+                    )
+                ],
+                [
+                    InlineKeyboardButton("📚 Help", callback_data="menu:help"),
+                    InlineKeyboardButton("💬 Support", url="https://t.me/lulucatch")
+                ],
+                [
+                    InlineKeyboardButton("🔍 Search", switch_inline_query_current_chat="")
+                ],
+            ])
+
+            await query.edit_message_text(
+                f"Welcome back, {user.first_name}~ 💋\n\n"
+                f"What would you like to do?",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=keyboard
+            )
+
+    # ========================================
+    # ❌ Error Handler
+    # ========================================
 
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Global error handler for the bot."""
-        error_logger.error(
-            f"Exception while handling an update: {context.error}",
-            exc_info=context.error
-        )
+        """Global error handler."""
+        error_logger.error(f"Error: {context.error}", exc_info=context.error)
 
         if isinstance(update, Update) and update.effective_message:
             try:
                 await update.effective_message.reply_text(
-                    "❌ An error occurred. Please try again later."
+                    "Oops~ Something went wrong, darling.\n"
+                    "Try again in a moment? 💕"
                 )
             except Exception:
                 pass
 
+
+
     # ========================================
-    # Register Conversation Handlers (MUST BE FIRST)
+    # 📝 Register Handlers
     # ========================================
 
+    # === Conversation Handlers (MUST BE FIRST) ===
     application.add_handler(upload_conversation_handler)
     application.add_handler(broadcast_conversation_handler)
     application.add_handler(edit_conversation_handler)
 
-    # ========================================
-    # Register Command Handlers
-    # ========================================
-
-    # Basic commands
+    # === Basic Commands ===
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("info", info_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("info", info_command))
 
-    # Catch commands
+    # === Catch System ===
     application.add_handler(catch_command_handler)
     application.add_handler(force_spawn_handler)
     application.add_handler(clear_cheat_handler)
     application.add_handler(view_cheaters_handler)
 
-    # Admin commands
+    # === Admin Commands ===
     application.add_handler(admin_command_handler)
     application.add_handler(stats_command_handler)
     application.add_handler(ban_command_handler)
     application.add_handler(unban_command_handler)
     application.add_handler(quick_upload_handler)
-
-    # New admin commands
     application.add_handler(delete_command_handler)
     application.add_handler(userinfo_command_handler)
     application.add_handler(give_card_command_handler)
     application.add_handler(give_coins_command_handler)
 
-    # ========================================
-    # Register Callback Query Handlers
-    # ========================================
-
-    # Upload rarity selection
-    application.add_handler(upload_rarity_callback_handler)
-
-    # Admin panel callbacks (exclude specific patterns)
+    # === Callback Handlers ===
+    
+    # Menu callbacks
     application.add_handler(CallbackQueryHandler(
-        admin_callback_handler,
-        pattern=r"^admin_(?!delcard_|user_|edit_)"
+        menu_callback_handler,
+        pattern=r"^menu:"
     ))
 
-    # Delete card callbacks
+    # Admin panel (new pattern)
+    application.add_handler(CallbackQueryHandler(
+        admin_callback_handler,
+        pattern=r"^adm:"
+    ))
+
+    # Delete card
     application.add_handler(delete_card_callback_handler)
 
-    # User management callbacks
+    # User management
     application.add_handler(user_management_callback_handler)
 
-    # Battle/Catch callbacks (secured with anti-cheat)
+    # Battle/Catch
     application.add_handler(battle_callback)
 
-    # ========================================
-    # Register Inline Search Handlers
-    # ========================================
-
+    # === Module Registrations ===
+    
+    # Inline search
     register_inline_handlers(application)
     register_inline_callback_handlers(application)
 
-    # ========================================
-    # Register Harem Handlers (replaces collection)
-    # ========================================
-
+    # Harem/Collection
     register_harem_handlers(application)
 
-    # ========================================
-    # Register Other Command Handlers
-    # ========================================
-
+    # Card info
     register_cardinfo_handlers(application)
+
+    # Trading
     register_trade_handlers(application)
+
+    # Leaderboard
     register_leaderboard_handlers(application)
 
-    # Register role handlers
-    register_role_handlers(application)
+    # Roles
+    if ROLES_AVAILABLE:
+        register_role_handlers(application)
 
-    # ========================================
-    # Register Drop System Handlers
-    # ========================================
-    
-    # Drop commands
+    # === Drop System ===
     application.add_handler(setdrop_handler)
     application.add_handler(droptime_handler)
     application.add_handler(lulucatch_handler)
@@ -381,42 +518,36 @@ async def setup_bot() -> Application:
     application.add_handler(cleardrop_handler)
     application.add_handler(dropstats_handler)
     
-    # Message counter (MUST be last - counts messages for drops)
+    # Message counter (MUST BE LAST)
     application.add_handler(message_counter)
-    
-    app_logger.info("✅ Drop system handlers registered")
 
-    # ========================================
-    # Error Handler
-    # ========================================
-
+    # === Error Handler ===
     application.add_error_handler(error_handler)
 
     # ========================================
-    # Set Bot Commands Menu
+    # 📋 Bot Commands Menu
     # ========================================
 
     commands = [
-        BotCommand("start", "🚀 Start the bot"),
-        BotCommand("help", "📚 Help & commands"),
+        BotCommand("start", "💋 Start & register"),
+        BotCommand("help", "📚 All commands"),
         BotCommand("catch", "⚔️ Battle for a card"),
-        BotCommand("lulucatch", "🎯 Catch dropped character"),
-        BotCommand("droptime", "⏱️ Time until next drop"),
-        BotCommand("harem", "🎴 View your harem"),
+        BotCommand("lulucatch", "🎯 Catch a drop"),
+        BotCommand("droptime", "⏱️ Next drop timer"),
+        BotCommand("harem", "🎴 Your collection"),
         BotCommand("cardinfo", "🔍 Card details"),
-        BotCommand("trades", "🔁 Pending trades"),
+        BotCommand("trades", "🔄 Your trades"),
         BotCommand("leaderboard", "🏆 Top collectors"),
-        BotCommand("info", "📊 Bot statistics"),
+        BotCommand("info", "📊 Bot stats"),
     ]
 
     try:
         await application.bot.set_my_commands(commands)
-        app_logger.info("✅ Bot commands menu set")
+        app_logger.info("✅ Commands menu set")
     except Exception as e:
-        error_logger.error(f"Failed to set commands: {e}")
+        error_logger.error(f"Commands menu error: {e}")
 
-    log_startup("✅ Bot configured with anti-cheat system")
-
+    log_startup("✅ Bot ready with registration system")
     return application
 
 
@@ -426,55 +557,40 @@ async def setup_bot() -> Application:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    FastAPI lifespan context manager.
-    Handles startup and shutdown events.
-    """
+    """FastAPI lifespan manager."""
     global bot_app
 
-    # ========================================
-    # 🚀 Startup
-    # ========================================
-    log_startup("Starting LuLuCatch Bot...")
+    # === Startup ===
+    log_startup("Starting LuLuCatch Bot v1.0...")
 
-    # Validate configuration
+    # Validate config
     is_valid, errors = Config.validate()
     if not is_valid:
         for error in errors:
             error_logger.error(error)
-        raise RuntimeError("Invalid configuration. Check the errors above.")
+        raise RuntimeError("Invalid configuration")
 
-    # Display configuration
     app_logger.info(Config.display_config())
 
-    # Try to connect to database
+    # Connect database
     db_connected = await db.connect(max_retries=3, retry_delay=2)
-
     if db_connected:
         await init_db()
     else:
-        app_logger.warning(
-            "⚠️ Bot starting without database connection. "
-            "Some features will be unavailable."
-        )
+        app_logger.warning("⚠️ Starting without database")
 
-    # Set up Telegram bot
+    # Setup bot
     bot_app = await setup_bot()
-
-    # Initialize and start the bot
     await bot_app.initialize()
     await bot_app.start()
 
-    # Set up webhook if URL is configured
+    # Webhook or polling
     if Config.WEBHOOK_URL:
         webhook_url = Config.get_full_webhook_url()
         log_webhook(f"Setting webhook: {webhook_url}")
 
         try:
-            # Delete any existing webhook first
             await bot_app.bot.delete_webhook(drop_pending_updates=False)
-
-            # Set new webhook
             webhook_set = await bot_app.bot.set_webhook(
                 url=webhook_url,
                 secret_token=Config.WEBHOOK_SECRET,
@@ -483,30 +599,24 @@ async def lifespan(app: FastAPI):
             )
 
             if webhook_set:
-                log_webhook("✅ Webhook configured successfully")
-
-                # Verify webhook was set
+                log_webhook("✅ Webhook configured")
                 webhook_info = await bot_app.bot.get_webhook_info()
-                log_webhook(f"Webhook URL: {webhook_info.url}")
-                log_webhook(f"Pending updates: {webhook_info.pending_update_count}")
+                log_webhook(f"URL: {webhook_info.url}")
             else:
-                error_logger.error("❌ Failed to set webhook")
+                error_logger.error("❌ Webhook failed")
 
         except Exception as e:
             error_logger.error(f"❌ Webhook error: {e}", exc_info=True)
     else:
-        # Use polling mode (for local development)
-        log_startup("⚠️ No webhook URL configured, using polling mode")
+        log_startup("⚠️ Using polling mode")
         asyncio.create_task(bot_app.updater.start_polling(drop_pending_updates=True))
 
-    log_startup("🎴 LuLuCatch Bot is running with anti-cheat protection!")
+    log_startup("🎴 LuLuCatch Bot v1.0 is live! 💋")
 
-    yield  # Application is running
+    yield
 
-    # ========================================
-    # 🛑 Shutdown
-    # ========================================
-    log_shutdown("Shutting down LuLuCatch Bot...")
+    # === Shutdown ===
+    log_shutdown("Shutting down...")
 
     if bot_app:
         try:
@@ -516,15 +626,14 @@ async def lifespan(app: FastAPI):
             error_logger.error(f"Shutdown error: {e}")
 
     await db.disconnect()
+    log_shutdown("✅ Shutdown complete")
 
-    log_shutdown("✅ LuLuCatch Bot shutdown complete")
 
-
-# Create FastAPI app with lifespan
+# Create FastAPI app
 app = FastAPI(
-    title="LuLuCatch Card Bot",
-    description="Telegram Card Collection Bot API with Anti-Cheat",
-    version="2.0.0",
+    title="LuLuCatch Bot",
+    description="Telegram Card Collection Bot",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -535,20 +644,19 @@ app = FastAPI(
 
 @app.get("/")
 async def root():
-    """Root endpoint - basic health check."""
+    """Health check."""
     return {
         "status": "online",
         "bot": "LuLuCatch",
-        "version": "2.0.0",
+        "version": "1.0.0",
         "database": "connected" if db.is_connected else "disconnected",
-        "features": ["anti-cheat", "individual-cooldowns", "rarity-based-battles", "harem-system"],
-        "message": "🎴 Card collection bot with anti-cheat protection!"
+        "message": "💋 Ready to catch some hearts~"
     }
 
 
 @app.get("/health")
 async def health_check():
-    """Detailed health check endpoint."""
+    """Detailed health check."""
     from db import health_check as db_health_check
 
     db_status = await db_health_check(None) if db.is_connected else False
@@ -557,71 +665,47 @@ async def health_check():
         "status": "healthy" if db_status else "degraded",
         "database": "connected" if db_status else "disconnected",
         "bot": "running" if bot_app else "stopped",
-        "anti_cheat": "active",
     }
 
 
 @app.post("/webhook")
 async def webhook_handler(request: Request) -> Response:
-    """
-    Webhook endpoint for receiving Telegram updates.
-    """
+    """Telegram webhook endpoint."""
     global bot_app
 
-    # Verify the webhook secret token
+    # Verify secret
     secret_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-
     if secret_token != Config.WEBHOOK_SECRET:
-        error_logger.warning("Invalid webhook secret token received")
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid secret token"
-        )
+        error_logger.warning("Invalid webhook token")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
 
     if bot_app is None:
-        error_logger.error("Bot application not initialized")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Bot not ready"
-        )
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Bot not ready")
 
     try:
-        # Parse the update from request body
         update_data = await request.json()
-
-        # Log incoming update
-        update_id = update_data.get("update_id", "unknown")
-        app_logger.debug(f"📥 Received update: {update_id}")
-
-        # Convert to Update object
         update = Update.de_json(update_data, bot_app.bot)
-
-        # Process the update
         await bot_app.process_update(update)
-
         return Response(status_code=status.HTTP_200_OK, content="OK")
 
     except Exception as e:
-        error_logger.error(f"Error processing webhook update: {e}", exc_info=True)
-        # Return 200 to prevent Telegram from retrying
+        error_logger.error(f"Webhook error: {e}", exc_info=True)
         return Response(status_code=status.HTTP_200_OK, content="Error logged")
 
 
 @app.get("/webhook")
 async def webhook_get():
-    """GET endpoint for webhook verification."""
-    return {"status": "Webhook endpoint active", "anti_cheat": "enabled"}
+    """Webhook verification."""
+    return {"status": "active", "version": "1.0.0"}
 
 
 # ============================================================
-# 🚀 Run the application
+# 🚀 Run Application
 # ============================================================
 
 if __name__ == "__main__":
-    # Set up logging
     setup_logging(debug=Config.DEBUG)
 
-    # Run FastAPI server
     uvicorn.run(
         "main:app",
         host=Config.HOST,
