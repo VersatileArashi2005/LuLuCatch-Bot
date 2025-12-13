@@ -76,8 +76,10 @@ from commands.inline_search import (
 # Import role handlers
 from handlers.roles import register_role_handlers
 
-# Import Part 4 handlers
+# Import harem handlers (replaces collection)
 from commands.harem import register_harem_handlers
+
+# Import other command handlers
 from commands.cardinfo import register_cardinfo_handlers
 from commands.trade import register_trade_handlers
 from commands.leaderboard import register_leaderboard_handlers
@@ -182,11 +184,11 @@ async def setup_bot() -> Application:
                 )
                 return
 
-            # Handle collection from inline
+            # Handle harem/collection from inline
             elif param == "collection" or param == "harem":
                 await update.message.reply_text(
-                    "🎴 *Your Collection*\n\n"
-                    "Use `/collection` to view your cards!",
+                    "🎴 *Your Harem*\n\n"
+                    "Use `/harem` to view your cards!",
                     parse_mode="Markdown"
                 )
                 return
@@ -198,7 +200,7 @@ async def setup_bot() -> Application:
             f"• /start - Show this message\n"
             f"• /help - View all commands\n"
             f"• /catch - Battle for a card\n"
-            f"• /collection - View your cards\n"
+            f"• /harem - View your cards\n"
             f"• /cardinfo <id> - Check card details\n"
             f"• /trades - View pending trades\n"
             f"• /leaderboard - Top collectors\n\n"
@@ -241,6 +243,8 @@ async def setup_bot() -> Application:
         if not update.message:
             return
 
+        bot_username = context.bot.username or "LuLuCatchBot"
+
         await update.message.reply_text(
             "📚 *LuLuCatch Bot Help*\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
@@ -250,10 +254,12 @@ async def setup_bot() -> Application:
             "• /help - This help message\n\n"
             "*Catching:*\n"
             "• /catch - Find & battle a card\n"
+            "• /lulucatch - Catch dropped card\n"
+            "• /droptime - Time until next drop\n"
             "• Win = Card is yours! 🏆\n"
             "• Lose = Card escapes 💀\n\n"
             "*Collection:*\n"
-            "• /collection - View your cards\n"
+            "• /harem - View your cards\n"
             "• /cardinfo <id> - Card details\n\n"
             "*Trading:*\n"
             "• /trades - View pending trades\n"
@@ -261,7 +267,7 @@ async def setup_bot() -> Application:
             "*Leaderboard:*\n"
             "• /leaderboard - Top collectors\n\n"
             "*Inline Mode:*\n"
-            "Type `@" + (context.bot.username or "bot") + " <query>` to search\n"
+            f"Type `@{bot_username} <query>` to search\n"
             "━━━━━━━━━━━━━━━━━━━━",
             parse_mode="Markdown"
         )
@@ -340,12 +346,6 @@ async def setup_bot() -> Application:
     application.add_handler(battle_callback)
 
     # ========================================
-    # Register Message Handlers
-    # ========================================
-
-    # Name guess handler (disabled for security, but kept for compatibility)
-
-    # ========================================
     # Register Inline Search Handlers
     # ========================================
 
@@ -353,10 +353,15 @@ async def setup_bot() -> Application:
     register_inline_callback_handlers(application)
 
     # ========================================
-    # Register Part 4 Handlers
+    # Register Harem Handlers (replaces collection)
     # ========================================
 
     register_harem_handlers(application)
+
+    # ========================================
+    # Register Other Command Handlers
+    # ========================================
+
     register_cardinfo_handlers(application)
     register_trade_handlers(application)
     register_leaderboard_handlers(application)
@@ -391,17 +396,13 @@ async def setup_bot() -> Application:
     # Set Bot Commands Menu
     # ========================================
 
-    # ========================================
-    # Set Bot Commands Menu (Updated)
-    # ========================================
-
     commands = [
         BotCommand("start", "🚀 Start the bot"),
         BotCommand("help", "📚 Help & commands"),
         BotCommand("catch", "⚔️ Battle for a card"),
         BotCommand("lulucatch", "🎯 Catch dropped character"),
         BotCommand("droptime", "⏱️ Time until next drop"),
-        BotCommand("harem", "🎴 View your harem"),  # Changed from collection
+        BotCommand("harem", "🎴 View your harem"),
         BotCommand("cardinfo", "🔍 Card details"),
         BotCommand("trades", "🔁 Pending trades"),
         BotCommand("leaderboard", "🏆 Top collectors"),
@@ -410,6 +411,7 @@ async def setup_bot() -> Application:
 
     try:
         await application.bot.set_my_commands(commands)
+        app_logger.info("✅ Bot commands menu set")
     except Exception as e:
         error_logger.error(f"Failed to set commands: {e}")
 
@@ -539,7 +541,7 @@ async def root():
         "bot": "LuLuCatch",
         "version": "2.0.0",
         "database": "connected" if db.is_connected else "disconnected",
-        "features": ["anti-cheat", "individual-cooldowns", "rarity-based-battles"],
+        "features": ["anti-cheat", "individual-cooldowns", "rarity-based-battles", "harem-system"],
         "message": "🎴 Card collection bot with anti-cheat protection!"
     }
 
