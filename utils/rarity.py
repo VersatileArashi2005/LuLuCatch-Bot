@@ -88,7 +88,7 @@ RARITY_TABLE: dict[int, Rarity] = {
     8: Rarity(
         id=8,
         name="Emerald",
-        emoji="💠",
+        emoji="🎐",
         probability=0.5,
         color_hex="#50C878"
     ),
