@@ -392,21 +392,21 @@ async def setup_bot() -> Application:
     # ========================================
 
     # ========================================
-# Set Bot Commands Menu (Updated)
-# ========================================
+    # Set Bot Commands Menu (Updated)
+    # ========================================
 
-commands = [
-    BotCommand("start", "🚀 Start the bot"),
-    BotCommand("help", "📚 Help & commands"),
-    BotCommand("catch", "⚔️ Battle for a card"),
-    BotCommand("lulucatch", "🎯 Catch dropped character"),
-    BotCommand("droptime", "⏱️ Time until next drop"),
-    BotCommand("harem", "🎴 View your harem"),  # Changed from collection
-    BotCommand("cardinfo", "🔍 Card details"),
-    BotCommand("trades", "🔁 Pending trades"),
-    BotCommand("leaderboard", "🏆 Top collectors"),
-    BotCommand("info", "📊 Bot statistics"),
-]
+    commands = [
+        BotCommand("start", "🚀 Start the bot"),
+        BotCommand("help", "📚 Help & commands"),
+        BotCommand("catch", "⚔️ Battle for a card"),
+        BotCommand("lulucatch", "🎯 Catch dropped character"),
+        BotCommand("droptime", "⏱️ Time until next drop"),
+        BotCommand("harem", "🎴 View your harem"),  # Changed from collection
+        BotCommand("cardinfo", "🔍 Card details"),
+        BotCommand("trades", "🔁 Pending trades"),
+        BotCommand("leaderboard", "🏆 Top collectors"),
+        BotCommand("info", "📊 Bot statistics"),
+    ]
 
     try:
         await application.bot.set_my_commands(commands)
