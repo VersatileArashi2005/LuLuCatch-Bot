@@ -1,7 +1,7 @@
 # ============================================================
 # 📁 File: config.py
 # 📍 Location: telegram_card_bot/config.py
-# 📝 Description: Configuration settings with role support
+# 📝 Description: Enhanced configuration with modern display
 # ============================================================
 
 import os
@@ -54,6 +54,19 @@ class Config:
     CARDS_PER_PAGE: int = int(os.getenv("CARDS_PER_PAGE", "6"))
     
     # ========================
+    # 🎨 UI Configuration (NEW)
+    # ========================
+    
+    # Enable auto-reactions on catches
+    ENABLE_CATCH_REACTIONS: bool = os.getenv("ENABLE_CATCH_REACTIONS", "true").lower() == "true"
+    
+    # Celebrate rare catches with special messages
+    CELEBRATE_RARE_CATCHES: bool = os.getenv("CELEBRATE_RARE_CATCHES", "true").lower() == "true"
+    
+    # Minimum rarity for celebration (7 = Platinum)
+    CELEBRATION_MIN_RARITY: int = int(os.getenv("CELEBRATION_MIN_RARITY", "7"))
+    
+    # ========================
     # 👑 Owner & Admin Configuration
     # ========================
     
@@ -63,7 +76,6 @@ class Config:
         else None
     )
     
-    # Legacy admin IDs (from env) - will be merged with database roles
     ADMIN_IDS: List[int] = [
         int(x.strip()) 
         for x in os.getenv("ADMIN_IDS", "").split(",") 
@@ -74,14 +86,12 @@ class Config:
     # 📢 Channel Configuration
     # ========================
     
-    # Channel for card database archive
     DATABASE_CHANNEL_ID: Optional[int] = (
         int(os.getenv("DATABASE_CHANNEL_ID"))
         if os.getenv("DATABASE_CHANNEL_ID", "").lstrip("-").isdigit()
         else None
     )
     
-    # Channel username (without @) for links
     DATABASE_CHANNEL_USERNAME: str = os.getenv("DATABASE_CHANNEL_USERNAME", "lulucatchdatabase")
     
     # ========================
@@ -97,6 +107,13 @@ class Config:
     ENABLE_INLINE_MODE: bool = os.getenv("ENABLE_INLINE_MODE", "true").lower() == "true"
     ENABLE_TRADING: bool = os.getenv("ENABLE_TRADING", "true").lower() == "true"
     AUTO_SPAWN: bool = os.getenv("AUTO_SPAWN", "true").lower() == "true"
+    
+    # ========================
+    # 🎯 Drop System Configuration
+    # ========================
+    
+    DROP_ENABLED: bool = os.getenv("DROP_ENABLED", "true").lower() == "true"
+    DEFAULT_DROP_THRESHOLD: int = int(os.getenv("DEFAULT_DROP_THRESHOLD", "50"))
     
     @classmethod
     def validate(cls) -> tuple[bool, list[str]]:
@@ -134,20 +151,48 @@ class Config:
     
     @classmethod
     def display_config(cls) -> str:
-        """Return a formatted string of non-sensitive config for logging."""
+        """Return a clean formatted string of non-sensitive config for logging."""
+        
+        # Status indicators
+        db_status = "✅" if cls.DATABASE_URL and cls.DATABASE_URL != "postgresql://user:password@localhost:5432/cardbot" else "⚠️"
+        webhook_status = "✅" if cls.WEBHOOK_URL else "⚠️ Polling"
+        owner_status = "✅" if cls.OWNER_ID else "⚠️ Not Set"
+        
         return f"""
-╔══════════════════════════════════════════╗
-║       🎴 Card Bot Configuration 🎴        ║
-╠══════════════════════════════════════════╣
-║ 🤖 Bot Username: @{cls.BOT_USERNAME:<20} ║
-║ 🌐 Webhook Mode: {str(bool(cls.WEBHOOK_URL)):<21} ║
-║ 🖥️  Port: {cls.PORT:<30} ║
-║ ⏱️  Cooldown: {cls.COOLDOWN_SECONDS}s{' ' * (26 - len(str(cls.COOLDOWN_SECONDS)))}║
-║ 👑 Owner ID: {str(cls.OWNER_ID or 'Not Set'):<25} ║
-║ 📢 DB Channel: {str(cls.DATABASE_CHANNEL_ID or 'Not Set'):<22} ║
-║ 🐛 Debug: {str(cls.DEBUG):<28} ║
-╚══════════════════════════════════════════╝
+🎴 *LuLuCatch Bot Configuration*
+
+🤖 Bot: @{cls.BOT_USERNAME}
+🌐 Webhook: {webhook_status}
+🗄️ Database: {db_status}
+👑 Owner: {owner_status}
+
+⚙️ *Settings*
+├ Cooldown: {cls.COOLDOWN_SECONDS}s
+├ Cards/Page: {cls.CARDS_PER_PAGE}
+├ Reactions: {"✅" if cls.ENABLE_CATCH_REACTIONS else "❌"}
+└ Debug: {"✅" if cls.DEBUG else "❌"}
+
+📊 *Features*
+├ Inline Mode: {"✅" if cls.ENABLE_INLINE_MODE else "❌"}
+├ Trading: {"✅" if cls.ENABLE_TRADING else "❌"}
+├ Auto Spawn: {"✅" if cls.AUTO_SPAWN else "❌"}
+└ Drop System: {"✅" if cls.DROP_ENABLED else "❌"}
 """
+    
+    @classmethod
+    def display_config_simple(cls) -> str:
+        """Simple one-line config display for startup logs."""
+        features = []
+        if cls.ENABLE_INLINE_MODE:
+            features.append("inline")
+        if cls.ENABLE_TRADING:
+            features.append("trading")
+        if cls.ENABLE_CATCH_REACTIONS:
+            features.append("reactions")
+        if cls.DROP_ENABLED:
+            features.append("drops")
+        
+        return f"@{cls.BOT_USERNAME} | Features: {', '.join(features) or 'none'}"
 
 
 config = Config()
