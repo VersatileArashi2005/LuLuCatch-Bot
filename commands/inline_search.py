@@ -30,12 +30,11 @@ from utils.constants import RARITY_EMOJIS, RARITY_NAMES
 # 📊 Constants
 # ============================================================
 
-# Telegram allows max 50 results per inline query
 RESULTS_PER_PAGE = 50
 
 
 # ============================================================
-# 🎨 Caption Formatter (for sent message)
+# 🎨 Caption Formatter
 # ============================================================
 
 def format_card_caption(
@@ -49,7 +48,6 @@ def format_card_caption(
     
     rarity_name, prob, rarity_emoji = rarity_to_text(rarity)
     
-    # Owner text
     if owner_count == 0:
         owner_text = "No owners yet"
     elif owner_count == 1:
@@ -57,12 +55,13 @@ def format_card_caption(
     else:
         owner_text = f"{owner_count} collectors"
     
+    # Using simpler markdown to avoid parsing issues
     caption = (
-        f"{rarity_emoji} *{character_name}*\n"
+        f"{rarity_emoji} {character_name}\n"
         f"\n"
         f"🎬 {anime}\n"
         f"{rarity_emoji} {rarity_name} ({prob}%)\n"
-        f"🆔 `#{card_id}`\n"
+        f"🆔 #{card_id}\n"
         f"\n"
         f"👥 {owner_text}"
     )
@@ -77,15 +76,6 @@ def format_card_caption(
 def parse_search_query(query: str) -> dict:
     """
     Parse search query for special filters.
-    
-    Supports:
-    - Regular text search
-    - #123 or 123 for card ID
-    - Rarity names (legendary, mythical, etc.)
-    - Rarity emojis (🌸, 🏵️, etc.)
-    
-    Returns:
-        dict with keys: type, value, original
     """
     query = query.strip()
     
@@ -124,10 +114,6 @@ def parse_search_query(query: str) -> dict:
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle inline queries for card search.
-    
-    - Preview: Shows clean card images only
-    - On select: Sends image WITH full card details caption
-    - Ordered by card_id ASC (oldest first)
     """
     if not update.inline_query:
         return
@@ -135,17 +121,15 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.inline_query.query.strip()
     user = update.inline_query.from_user
     
-    # Skip if it's a collection query (handled by harem.py)
+    # Skip collection queries
     if query.startswith("collection."):
         return
     
-    # Get offset for pagination
     offset_str = update.inline_query.offset
     offset = int(offset_str) if offset_str else 0
     
     app_logger.info(f"🔍 Inline search: '{query}' offset={offset} from {user.id}")
     
-    # Check database
     if not db.is_connected:
         await update.inline_query.answer(
             results=[
@@ -163,13 +147,10 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     try:
-        # Parse query
         parsed = parse_search_query(query)
         
-        # Build SQL based on query type
-        # Always order by card_id ASC (first added first)
+        # Build query based on type
         if parsed["type"] == "card_id":
-            # Search by specific card ID
             cards = await db.fetch(
                 """
                 SELECT 
@@ -191,7 +172,6 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         
         elif parsed["type"] == "rarity":
-            # Filter by rarity, ordered by card_id
             cards = await db.fetch(
                 """
                 SELECT 
@@ -214,7 +194,6 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         
         elif parsed["type"] == "text":
-            # Text search, ordered by card_id
             search_pattern = f"%{parsed['value']}%"
             cards = await db.fetch(
                 """
@@ -242,7 +221,6 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         
         else:
-            # All cards - ordered by card_id ASC (oldest first)
             cards = await db.fetch(
                 """
                 SELECT 
@@ -264,7 +242,6 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 RESULTS_PER_PAGE, offset
             )
         
-        # No results
         if not cards and offset == 0:
             await update.inline_query.answer(
                 results=[],
@@ -287,8 +264,9 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             anime = card["anime"]
             rarity = card.get("rarity", 1)
             owner_count = card.get("owner_count", 0)
+            rarity_emoji = RARITY_EMOJIS.get(rarity, "❓")
             
-            # Format caption for the SENT message (with full details)
+            # Build caption for sent message
             caption = format_card_caption(
                 card_id=card_id,
                 character_name=character_name,
@@ -297,23 +275,21 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 owner_count=owner_count
             )
             
-            # Create result:
-            # - Preview shows just the image (no title/description clutter)
-            # - When selected, sends image WITH caption
+            # Log for debugging
+            app_logger.debug(f"Card {card_id} caption: {caption[:50]}...")
+            
             result = InlineQueryResultCachedPhoto(
-                id=f"card_{card_id}",
+                id=f"card_{card_id}_{uuid4().hex[:6]}",
                 photo_file_id=photo_file_id,
+                title=f"{rarity_emoji} {character_name}",
+                description=f"{anime} • #{card_id}",
                 caption=caption,
-                parse_mode="Markdown"
-                # No title or description = clean preview
+                parse_mode=None  # No parse mode to avoid markdown issues
             )
             results.append(result)
         
-        # Calculate next offset for pagination
-        if len(cards) >= RESULTS_PER_PAGE:
-            next_offset = str(offset + RESULTS_PER_PAGE)
-        else:
-            next_offset = ""
+        # Pagination
+        next_offset = str(offset + RESULTS_PER_PAGE) if len(cards) >= RESULTS_PER_PAGE else ""
         
         await update.inline_query.answer(
             results=results,
@@ -333,11 +309,11 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ============================================================
-# 📊 Chosen Inline Result Handler (Analytics)
+# 📊 Chosen Inline Result Handler
 # ============================================================
 
 async def chosen_inline_result_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Track which inline results users select (for analytics)."""
+    """Track which inline results users select."""
     
     if not update.chosen_inline_result:
         return
@@ -365,7 +341,7 @@ def register_inline_handlers(application: Application) -> None:
 
 
 def register_inline_callback_handlers(application: Application) -> None:
-    """Register chosen inline result handler for analytics."""
+    """Register chosen inline result handler."""
     
     application.add_handler(
         ChosenInlineResultHandler(chosen_inline_result_handler)
