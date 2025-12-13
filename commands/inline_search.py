@@ -1,7 +1,7 @@
 # ============================================================
 # 📁 File: commands/inline_search.py
 # 📍 Location: telegram_card_bot/commands/inline_search.py
-# 📝 Description: Enhanced inline search with modern UI
+# 📝 Description: Clean inline search - images only, ordered by ID
 # ============================================================
 
 from uuid import uuid4
@@ -11,8 +11,6 @@ from telegram import (
     InlineQueryResultCachedPhoto,
     InlineQueryResultArticle,
     InputTextMessageContent,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
 )
 from telegram.ext import (
     Application,
@@ -24,71 +22,16 @@ from telegram.ext import (
 from config import Config
 from db import db
 from utils.logger import app_logger, error_logger
-from utils.rarity import rarity_to_text, get_rarity, RARITY_TABLE
-from utils.constants import (
-    RARITY_EMOJIS,
-    RARITY_NAMES,
-    Pagination,
-)
+from utils.constants import RARITY_EMOJIS, RARITY_NAMES
 
 
 # ============================================================
 # 📊 Constants
 # ============================================================
 
-RESULTS_PER_PAGE = Pagination.INLINE_RESULTS
-
-
-# ============================================================
-# 🎨 Caption Formatter
-# ============================================================
-
-def format_inline_caption(
-    card_id: int,
-    character_name: str,
-    anime: str,
-    rarity: int,
-    owner_count: int = 0
-) -> str:
-    """Create clean card caption for inline results."""
-    
-    rarity_name, prob, rarity_emoji = rarity_to_text(rarity)
-    
-    # Owner text
-    if owner_count == 0:
-        owner_text = "_No owners yet_"
-    elif owner_count == 1:
-        owner_text = "_1 collector_"
-    else:
-        owner_text = f"_{owner_count} collectors_"
-    
-    caption = (
-        f"{rarity_emoji} *{character_name}*\n\n"
-        f"🎬 {anime}\n"
-        f"{rarity_emoji} {rarity_name} ({prob}%)\n"
-        f"🆔 `#{card_id}`\n\n"
-        f"👥 {owner_text}"
-    )
-    
-    return caption
-
-
-def format_card_title(
-    character_name: str,
-    rarity: int
-) -> str:
-    """Format card title for inline result."""
-    rarity_emoji = RARITY_EMOJIS.get(rarity, "☘️")
-    return f"{rarity_emoji} {character_name}"
-
-
-def format_card_description(
-    anime: str,
-    card_id: int,
-    owner_count: int = 0
-) -> str:
-    """Format card description for inline result."""
-    return f"{anime} • #{card_id} • 👥 {owner_count}"
+# Telegram allows max 50 results per inline query
+# We'll fetch more and paginate
+RESULTS_PER_PAGE = 50
 
 
 # ============================================================
@@ -146,11 +89,8 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     """
     Handle inline queries for card search.
     
-    Supports:
-    - Empty query: Show recent/popular cards
-    - Text: Search by character or anime name
-    - #ID: Search by card ID
-    - Rarity name/emoji: Filter by rarity
+    Returns ONLY card images, ordered by card_id (ascending).
+    No captions, no metadata - just clean images.
     """
     if not update.inline_query:
         return
@@ -190,131 +130,73 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         parsed = parse_search_query(query)
         
         # Build SQL based on query type
+        # Always order by card_id ASC (first added first)
         if parsed["type"] == "card_id":
             # Search by specific card ID
             cards = await db.fetch(
                 """
-                SELECT 
-                    c.card_id, 
-                    c.character_name, 
-                    c.anime, 
-                    c.rarity, 
-                    c.photo_file_id,
-                    (
-                        SELECT COUNT(DISTINCT user_id) 
-                        FROM collections 
-                        WHERE card_id = c.card_id AND quantity > 0
-                    ) as owner_count
-                FROM cards c
-                WHERE c.is_active = TRUE AND c.card_id = $1
+                SELECT card_id, photo_file_id
+                FROM cards
+                WHERE is_active = TRUE AND card_id = $1
                 LIMIT 1
                 """,
                 parsed["value"]
             )
         
         elif parsed["type"] == "rarity":
-            # Filter by rarity
+            # Filter by rarity, ordered by card_id
             cards = await db.fetch(
                 """
-                SELECT 
-                    c.card_id, 
-                    c.character_name, 
-                    c.anime, 
-                    c.rarity, 
-                    c.photo_file_id,
-                    (
-                        SELECT COUNT(DISTINCT user_id) 
-                        FROM collections 
-                        WHERE card_id = c.card_id AND quantity > 0
-                    ) as owner_count
-                FROM cards c
-                WHERE c.is_active = TRUE AND c.rarity = $1
-                ORDER BY c.character_name ASC
+                SELECT card_id, photo_file_id
+                FROM cards
+                WHERE is_active = TRUE AND rarity = $1
+                ORDER BY card_id ASC
                 LIMIT $2 OFFSET $3
                 """,
                 parsed["value"], RESULTS_PER_PAGE, offset
             )
         
         elif parsed["type"] == "text":
-            # Text search
+            # Text search, ordered by card_id
             search_pattern = f"%{parsed['value']}%"
             cards = await db.fetch(
                 """
-                SELECT 
-                    c.card_id, 
-                    c.character_name, 
-                    c.anime, 
-                    c.rarity, 
-                    c.photo_file_id,
-                    (
-                        SELECT COUNT(DISTINCT user_id) 
-                        FROM collections 
-                        WHERE card_id = c.card_id AND quantity > 0
-                    ) as owner_count
-                FROM cards c
-                WHERE c.is_active = TRUE
+                SELECT card_id, photo_file_id
+                FROM cards
+                WHERE is_active = TRUE
                   AND (
-                    LOWER(c.character_name) LIKE LOWER($1)
-                    OR LOWER(c.anime) LIKE LOWER($1)
+                    LOWER(character_name) LIKE LOWER($1)
+                    OR LOWER(anime) LIKE LOWER($1)
                   )
-                ORDER BY c.rarity DESC, c.character_name ASC
+                ORDER BY card_id ASC
                 LIMIT $2 OFFSET $3
                 """,
                 search_pattern, RESULTS_PER_PAGE, offset
             )
         
         else:
-            # All cards (empty query)
+            # All cards - ordered by card_id ASC (oldest first)
             cards = await db.fetch(
                 """
-                SELECT 
-                    c.card_id, 
-                    c.character_name, 
-                    c.anime, 
-                    c.rarity, 
-                    c.photo_file_id,
-                    (
-                        SELECT COUNT(DISTINCT user_id) 
-                        FROM collections 
-                        WHERE card_id = c.card_id AND quantity > 0
-                    ) as owner_count
-                FROM cards c
-                WHERE c.is_active = TRUE
-                ORDER BY c.rarity DESC, c.card_id DESC
+                SELECT card_id, photo_file_id
+                FROM cards
+                WHERE is_active = TRUE
+                ORDER BY card_id ASC
                 LIMIT $1 OFFSET $2
                 """,
                 RESULTS_PER_PAGE, offset
             )
         
-        # No results on first page
+        # No results
         if not cards and offset == 0:
-            hint_text = ""
-            if parsed["type"] == "text":
-                hint_text = f"No cards matching '{parsed['value']}'"
-            elif parsed["type"] == "rarity":
-                rarity_name = RARITY_NAMES.get(parsed["value"], "this rarity")
-                hint_text = f"No {rarity_name} cards found"
-            elif parsed["type"] == "card_id":
-                hint_text = f"Card #{parsed['value']} not found"
-            else:
-                hint_text = "No cards in database"
-            
             await update.inline_query.answer(
-                results=[
-                    InlineQueryResultArticle(
-                        id=str(uuid4()),
-                        title="📭 No cards found",
-                        description=hint_text,
-                        input_message_content=InputTextMessageContent(
-                            message_text=f"📭 {hint_text}"
-                        )
-                    )
-                ],
-                cache_time=30
+                results=[],
+                cache_time=30,
+                is_personal=False
             )
             return
         
-        # Build results
+        # Build results - IMAGES ONLY, NO CAPTION
         results = []
         
         for card in cards:
@@ -324,57 +206,24 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 continue
             
             card_id = card["card_id"]
-            character_name = card["character_name"]
-            anime = card["anime"]
-            rarity = card.get("rarity", 1)
-            owner_count = card.get("owner_count", 0)
             
-            # Format caption
-            caption = format_inline_caption(
-                card_id=card_id,
-                character_name=character_name,
-                anime=anime,
-                rarity=rarity,
-                owner_count=owner_count
-            )
-            
+            # Create result with NO caption - just the image
             result = InlineQueryResultCachedPhoto(
-                id=f"card_{card_id}_{uuid4().hex[:8]}",
+                id=f"card_{card_id}",
                 photo_file_id=photo_file_id,
-                title=format_card_title(character_name, rarity),
-                description=format_card_description(anime, card_id, owner_count),
-                caption=caption,
-                parse_mode="Markdown"
+                # No title, description, or caption - just the image
             )
             results.append(result)
         
-        # Pagination
+        # Calculate next offset for pagination
         if len(cards) >= RESULTS_PER_PAGE:
             next_offset = str(offset + RESULTS_PER_PAGE)
         else:
             next_offset = ""
         
-        # Add help hint on first page with empty query
-        if offset == 0 and not query:
-            results.insert(0, InlineQueryResultArticle(
-                id="help_hint",
-                title="💡 Search Tips",
-                description="Type anime name, character, #ID, or rarity",
-                input_message_content=InputTextMessageContent(
-                    message_text=(
-                        "🔍 *Inline Search Tips*\n\n"
-                        "• Type character or anime name\n"
-                        "• Use `#123` for specific card ID\n"
-                        "• Type `legendary` or `🌸` for rarity filter\n"
-                        "• Use `collection.YOUR_ID` to view your cards"
-                    ),
-                    parse_mode="Markdown"
-                )
-            ))
-        
         await update.inline_query.answer(
             results=results,
-            cache_time=60,
+            cache_time=300,  # Cache for 5 minutes since images don't change
             is_personal=False,
             next_offset=next_offset
         )
@@ -384,16 +233,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         error_logger.error(f"Inline search error: {e}", exc_info=True)
         await update.inline_query.answer(
-            results=[
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title="❌ Search Error",
-                    description="Something went wrong",
-                    input_message_content=InputTextMessageContent(
-                        message_text="❌ An error occurred during search"
-                    )
-                )
-            ],
+            results=[],
             cache_time=10
         )
 
@@ -422,10 +262,9 @@ async def chosen_inline_result_handler(update: Update, context: ContextTypes.DEF
 def register_inline_handlers(application: Application) -> None:
     """Register inline search handlers."""
     
-    # Main inline query handler (lower priority than collection handler)
     application.add_handler(
         InlineQueryHandler(inline_query_handler),
-        group=1  # Lower priority
+        group=1
     )
     
     app_logger.info("✅ Inline search handlers registered")
