@@ -1,12 +1,19 @@
 # ============================================================
-# 📁 File: utils/rarity.py  
+# 📁 File: utils/rarity.py
 # 📍 Location: telegram_card_bot/utils/rarity.py
-# 📝 Description: Rarity system with updated emojis
+# 📝 Description: Enhanced rarity system with reactions & celebrations
 # ============================================================
 
 import random
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List, Tuple
+
+from utils.constants import (
+    RARITY_EMOJIS,
+    RARITY_NAMES,
+    PRIMARY_CATCH_REACTION,
+    CATCH_REACTIONS,
+)
 
 
 @dataclass(frozen=True)
@@ -21,18 +28,66 @@ class Rarity:
     def __str__(self) -> str:
         return f"{self.emoji} {self.name}"
     
+    @property
+    def display(self) -> str:
+        """Clean display format."""
+        return f"{self.emoji} {self.name}"
+    
+    @property
+    def display_with_rate(self) -> str:
+        """Display with drop rate."""
+        return f"{self.emoji} {self.name} ({self.probability}%)"
+    
+    @property
+    def tier(self) -> str:
+        """Get tier classification."""
+        if self.id <= 2:
+            return "common"
+        elif self.id <= 5:
+            return "rare"
+        elif self.id <= 8:
+            return "epic"
+        else:
+            return "legendary"
+    
+    @property
+    def is_rare(self) -> bool:
+        """Check if this is a rare+ card."""
+        return self.id >= 4
+    
+    @property
+    def is_epic(self) -> bool:
+        """Check if this is epic+ tier."""
+        return self.id >= 5
+    
+    @property
+    def is_legendary_tier(self) -> bool:
+        """Check if this is legendary tier (9+)."""
+        return self.id >= 9
+    
+    @property
+    def catch_reaction(self) -> str:
+        """Get Telegram reaction emoji for catching this rarity."""
+        return PRIMARY_CATCH_REACTION.get(self.id, "👍")
+    
+    @property
+    def celebration_reactions(self) -> List[str]:
+        """Get all celebration reactions for this rarity."""
+        return CATCH_REACTIONS.get(self.id, ["👍"])
+    
     def to_dict(self) -> dict:
         return {
             "id": self.id,
             "name": self.name,
             "emoji": self.emoji,
             "probability": self.probability,
-            "color_hex": self.color_hex
+            "color_hex": self.color_hex,
+            "tier": self.tier,
         }
 
 
 # ============================================================
-# 🎴 Updated Rarity Table
+# 🎴 Rarity Table
 # ============================================================
 
 RARITY_TABLE: dict[int, Rarity] = {
@@ -117,15 +172,22 @@ RARITY_TABLE: dict[int, Rarity] = {
 
 
 # ============================================================
-# 🔧 Utility Functions
+# 🔧 Core Utility Functions
 # ============================================================
 
-def rarity_to_text(rarity_id: int) -> tuple[str, float, str]:
-    """Convert rarity ID to (name, probability, emoji)."""
-    if rarity_id not in RARITY_TABLE:
-        raise ValueError(f"Invalid rarity ID: {rarity_id}")
-    
-    rarity = RARITY_TABLE[rarity_id]
+def get_rarity(rarity_id: int) -> Optional[Rarity]:
+    """Get Rarity object by ID."""
+    return RARITY_TABLE.get(rarity_id)
+
+
+def rarity_to_text(rarity_id: int) -> Tuple[str, float, str]:
+    """
+    Convert rarity ID to (name, probability, emoji).
+    Legacy function for compatibility.
+    """
+    rarity = RARITY_TABLE.get(rarity_id)
+    if not rarity:
+        return "Unknown", 0.0, "❓"
     return rarity.name, rarity.probability, rarity.emoji
 
 
@@ -145,16 +207,12 @@ def get_random_rarity() -> int:
 
 def get_rarity_emoji(rarity_id: int) -> str:
     """Get emoji for a rarity."""
-    if rarity_id not in RARITY_TABLE:
-        return "❓"
-    return RARITY_TABLE[rarity_id].emoji
+    return RARITY_EMOJIS.get(rarity_id, "❓")
 
 
 def get_rarity_name(rarity_id: int) -> str:
     """Get name for a rarity."""
-    if rarity_id not in RARITY_TABLE:
-        return "Unknown"
-    return RARITY_TABLE[rarity_id].name
+    return RARITY_NAMES.get(rarity_id, "Unknown")
 
 
 def get_rarity_by_name(name: str) -> Optional[Rarity]:
@@ -166,35 +224,82 @@ def get_rarity_by_name(name: str) -> Optional[Rarity]:
     return None
 
 
-def get_all_rarities() -> list[Rarity]:
+def get_all_rarities() -> List[Rarity]:
     """Get all rarities sorted by ID."""
     return [RARITY_TABLE[i] for i in sorted(RARITY_TABLE.keys())]
 
 
+# ============================================================
+# 🎨 Display Functions
+# ============================================================
+
 def format_rarity_display(rarity_id: int, include_probability: bool = False) -> str:
     """Format rarity for display."""
-    if rarity_id not in RARITY_TABLE:
+    rarity = RARITY_TABLE.get(rarity_id)
+    if not rarity:
         return "❓ Unknown"
     
-    rarity = RARITY_TABLE[rarity_id]
-    base = f"{rarity.emoji} {rarity.name}"
-    
     if include_probability:
-        return f"{base} ({rarity.probability}%)"
-    return base
+        return rarity.display_with_rate
+    return rarity.display
 
 
 def get_rarity_tier(rarity_id: int) -> str:
     """Get tier classification for a rarity."""
-    if rarity_id <= 2:
-        return "common"
-    elif rarity_id <= 5:
-        return "rare"
-    elif rarity_id <= 8:
-        return "epic"
-    else:
-        return "legendary"
+    rarity = RARITY_TABLE.get(rarity_id)
+    if rarity:
+        return rarity.tier
+    return "common"
 
+
+def is_rare_plus(rarity_id: int) -> bool:
+    """Check if rarity is Rare or higher."""
+    return rarity_id >= 4
+
+
+def is_legendary_tier(rarity_id: int) -> bool:
+    """Check if rarity is Crystal, Mythical, or Legendary."""
+    return rarity_id >= 9
+
+
+# ============================================================
+# 🎉 Celebration & Reaction Functions
+# ============================================================
+
+def get_catch_reaction(rarity_id: int) -> str:
+    """Get the primary Telegram reaction emoji for a catch."""
+    return PRIMARY_CATCH_REACTION.get(rarity_id, "👍")
+
+
+def get_celebration_reactions(rarity_id: int) -> List[str]:
+    """Get all celebration reactions for a rarity."""
+    return CATCH_REACTIONS.get(rarity_id, ["👍"])
+
+
+def should_celebrate(rarity_id: int) -> bool:
+    """Check if this rarity deserves extra celebration."""
+    return rarity_id >= 7  # Platinum and above
+
+
+def get_catch_celebration_text(rarity_id: int) -> str:
+    """Get celebration prefix text based on rarity."""
+    if rarity_id == 11:
+        return "🎊 LEGENDARY CATCH! 🎊"
+    elif rarity_id == 10:
+        return "✨ MYTHICAL CATCH! ✨"
+    elif rarity_id == 9:
+        return "❄️ CRYSTAL CATCH! ❄️"
+    elif rarity_id >= 7:
+        return "✨ RARE CATCH! ✨"
+    elif rarity_id >= 5:
+        return "🔥 Nice Catch!"
+    else:
+        return ""
+
+
+# ============================================================
+# 💰 Value & Scoring Functions
+# ============================================================
 
 def calculate_rarity_value(rarity_id: int, base_value: int = 100) -> int:
     """Calculate value score based on rarity."""
@@ -204,6 +309,28 @@ def calculate_rarity_value(rarity_id: int, base_value: int = 100) -> int:
     multiplier = 2 ** (rarity_id - 1)
     return base_value * multiplier
 
+
+def get_xp_reward(rarity_id: int, base_xp: int = 10) -> int:
+    """Calculate XP reward for catching a card."""
+    multipliers = {
+        1: 1, 2: 1, 3: 2, 4: 3, 5: 5,
+        6: 7, 7: 10, 8: 15, 9: 25, 10: 50, 11: 100
+    }
+    return base_xp * multipliers.get(rarity_id, 1)
+
+
+def get_coin_reward(rarity_id: int, base_coins: int = 5) -> int:
+    """Calculate coin reward for catching a card."""
+    multipliers = {
+        1: 1, 2: 1, 3: 2, 4: 3, 5: 5,
+        6: 8, 7: 12, 8: 20, 9: 35, 10: 60, 11: 150
+    }
+    return base_coins * multipliers.get(rarity_id, 1)
+
+
+# ============================================================
+# 📊 Statistics Functions
+# ============================================================
 
 def get_rarity_statistics() -> dict:
     """Get statistics about the rarity system."""
@@ -217,7 +344,7 @@ def get_rarity_statistics() -> dict:
     }
     
     for rarity in RARITY_TABLE.values():
-        tier = get_rarity_tier(rarity.id)
+        tier = rarity.tier
         tier_stats[tier]["count"] += 1
         tier_stats[tier]["total_prob"] += rarity.probability
     
@@ -230,19 +357,11 @@ def get_rarity_statistics() -> dict:
     }
 
 
-def print_rarity_table() -> str:
-    """Generate formatted table of all rarities."""
-    lines = [
-        "╔════╦════════════════════╦═══════╦════════════╗",
-        "║ ID ║ Rarity             ║ Emoji ║ Probability║",
-        "╠════╬════════════════════╬═══════╬════════════╣",
-    ]
+def get_rarity_list_display() -> str:
+    """Get a clean list of all rarities for display."""
+    lines = ["*All Rarities:*\n"]
     
     for rarity in get_all_rarities():
-        lines.append(
-            f"║ {rarity.id:2} ║ {rarity.name:<18} ║   {rarity.emoji}  ║ {rarity.probability:>9.2f}% ║"
-        )
-    
-    lines.append("╚════╩════════════════════╩═══════╩════════════╝")
+        lines.append(f"{rarity.emoji} {rarity.name} — {rarity.probability}%")
     
     return "\n".join(lines)
