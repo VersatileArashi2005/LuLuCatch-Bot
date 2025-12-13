@@ -380,3 +380,487 @@ def format_already_caught(catcher_name: str, catcher_id: int, character: str) ->
         f"⚡ *Too slow!*\n\n"
         f"[{catcher_name}](tg://user?id={catcher_id}) already caught *{character}*!"
     )
+
+
+# ============================================================
+# 🎴 Spawn Drop Function
+# ============================================================
+
+async def spawn_card_drop(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    chat_title: Optional[str] = None
+) -> bool:
+    """Spawn a card drop in group."""
+    
+    # Check lock
+    if drop_locks.get(chat_id, False):
+        return False
+    
+    drop_locks[chat_id] = True
+    
+    try:
+        # Check existing drop
+        if chat_id in active_drops:
+            existing = active_drops[chat_id]
+            spawned_at = existing.get("spawned_at")
+            if spawned_at and (datetime.now() - spawned_at).seconds < DROP_TIMEOUT:
+                drop_locks[chat_id] = False
+                return False
+            del active_drops[chat_id]
+        
+        # Reset count first
+        await reset_message_count(chat_id)
+        
+        # Get card
+        card = await get_random_card_for_drop()
+        if not card:
+            error_logger.warning(f"No cards for drop in {chat_id}")
+            drop_locks[chat_id] = False
+            return False
+        
+        photo_id = card.get("photo_file_id")
+        if not photo_id:
+            error_logger.warning(f"Card {card['card_id']} has no photo")
+            drop_locks[chat_id] = False
+            return False
+        
+        # Format message
+        caption = format_drop_message(card, chat_title)
+        
+        # Send with spoiler
+        message = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=photo_id,
+            caption=caption,
+            parse_mode=ParseMode.MARKDOWN,
+            has_spoiler=True
+        )
+        
+        # Store active drop
+        active_drops[chat_id] = {
+            "card": card,
+            "message_id": message.message_id,
+            "spawned_at": datetime.now(),
+            "caught_by": None
+        }
+        
+        rarity = card.get("rarity", 1)
+        emoji = RARITY_EMOJIS.get(rarity, "☘️")
+        app_logger.info(f"🎴 Drop: {card['character_name']} ({emoji}) in {chat_id}")
+        
+        drop_locks[chat_id] = False
+        return True
+        
+    except TelegramError as e:
+        error_logger.error(f"Drop spawn failed: {e}")
+        drop_locks[chat_id] = False
+        return False
+    except Exception as e:
+        error_logger.error(f"Unexpected drop error: {e}", exc_info=True)
+        drop_locks[chat_id] = False
+        return False
+
+
+# ============================================================
+# 📝 Command Handlers
+# ============================================================
+
+async def setdrop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /setdrop command."""
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    log_command(user.id, "setdrop", chat.id)
+    
+    if not Config.is_admin(user.id):
+        await update.message.reply_text("🚫 Admin only.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("❌ Groups only.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if not context.args:
+        settings = await get_group_drop_settings(chat.id)
+        progress = min(100, int((settings['message_count'] / settings['threshold']) * 100)) if settings['threshold'] > 0 else 0
+        
+        await update.message.reply_text(
+            f"⚙️ *Drop Settings*\n\n"
+            f"📊 Threshold: `{settings['threshold']}` messages\n"
+            f"💬 Current: `{settings['message_count']}` ({progress}%)\n"
+            f"✅ Enabled: `{settings['enabled']}`\n\n"
+            f"Usage: `/setdrop <number>`\n"
+            f"Range: {MIN_DROP_THRESHOLD}-{MAX_DROP_THRESHOLD}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    try:
+        threshold = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid number.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if threshold < MIN_DROP_THRESHOLD or threshold > MAX_DROP_THRESHOLD:
+        await update.message.reply_text(
+            f"❌ Must be {MIN_DROP_THRESHOLD}-{MAX_DROP_THRESHOLD}.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    await ensure_group_exists(chat.id, chat.title)
+    
+    if await set_group_drop_threshold(chat.id, threshold):
+        await update.message.reply_text(
+            f"✅ *Drop threshold set to* `{threshold}` *messages*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        app_logger.info(f"⚙️ Drop threshold: {threshold} in {chat.id} by {user.id}")
+    else:
+        await update.message.reply_text("❌ Failed to update.", parse_mode=ParseMode.MARKDOWN)
+
+
+async def droptime_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /droptime command."""
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    log_command(user.id, "droptime", chat.id)
+    
+    if chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("❌ Groups only.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    settings = await get_group_drop_settings(chat.id)
+    threshold = settings["threshold"]
+    current = settings["message_count"]
+    remaining = max(0, threshold - current)
+    progress = min(100, int((current / threshold) * 100)) if threshold > 0 else 0
+    
+    # Progress bar
+    filled = progress // 5
+    bar = "●" * filled + "○" * (20 - filled)
+    
+    # Active drop status
+    active_text = ""
+    if chat.id in active_drops and not active_drops[chat.id].get("caught_by"):
+        active_text = "\n\n🚨 *Active drop!* Use `/lulucatch <name>`"
+    
+    await update.message.reply_text(
+        f"⏱️ *Drop Status*\n\n"
+        f"`{bar}` {progress}%\n\n"
+        f"💬 `{current}` / `{threshold}` messages\n"
+        f"⏳ `{remaining}` remaining{active_text}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+async def lulucatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /lulucatch command with auto-reaction."""
+    user = update.effective_user
+    chat = update.effective_chat
+    message = update.message
+    
+    log_command(user.id, "lulucatch", chat.id)
+    
+    if chat.type not in ["group", "supergroup"]:
+        await message.reply_text("❌ Groups only.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    # Check active drop
+    drop = active_drops.get(chat.id)
+    if not drop:
+        await message.reply_text(
+            "❌ *No active drop!*\n\n"
+            "Wait for a character to appear...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Check if already caught
+    if drop.get("caught_by"):
+        catcher = drop["caught_by"]
+        await message.reply_text(
+            format_already_caught(
+                catcher["first_name"],
+                catcher["user_id"],
+                drop["card"]["character_name"]
+            ),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Check timeout
+    spawned_at = drop.get("spawned_at")
+    if spawned_at and (datetime.now() - spawned_at).seconds >= DROP_TIMEOUT:
+        del active_drops[chat.id]
+        await message.reply_text(
+            "⏰ *Drop expired!*\n\nThe character ran away...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Check guess
+    if not context.args:
+        await message.reply_text(
+            "❌ Provide the name!\n\n"
+            "Usage: `/lulucatch <name>`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    guess = " ".join(context.args).strip()
+    actual_name = drop["card"]["character_name"]
+    
+    is_match, similarity = check_name_match(guess, actual_name)
+    
+    if not is_match:
+        await message.reply_text(
+            format_wrong_guess(similarity),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # === SUCCESSFUL CATCH ===
+    
+    card = drop["card"]
+    card_id = card["card_id"]
+    character = card["character_name"]
+    rarity = card["rarity"]
+    
+    # Mark as caught
+    drop["caught_by"] = {
+        "user_id": user.id,
+        "first_name": user.first_name
+    }
+    
+    # Record in database
+    coin_reward = get_coin_reward(rarity)
+    xp_reward = get_xp_reward(rarity)
+    
+    if not await record_catch(user.id, card_id, chat.id, user.username, user.first_name):
+        await message.reply_text("❌ Error saving. Try again.", parse_mode=ParseMode.MARKDOWN)
+        drop["caught_by"] = None
+        return
+    
+    # Add coins
+    try:
+        await db.execute(
+            "UPDATE users SET coins = COALESCE(coins, 0) + $2 WHERE user_id = $1",
+            user.id, coin_reward
+        )
+    except Exception:
+        pass
+    
+    # Check if new card
+    try:
+        count = await db.fetchval(
+            "SELECT quantity FROM collections WHERE user_id = $1 AND card_id = $2",
+            user.id, card_id
+        )
+        is_new = (count == 1)
+    except Exception:
+        is_new = True
+    
+    # Send success message
+    await message.reply_text(
+        format_catch_success(user.first_name, user.id, card, is_new),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # === AUTO-REACTION ===
+    if REACTIONS_AVAILABLE and Config.ENABLE_CATCH_REACTIONS:
+        try:
+            reaction_emoji = get_catch_reaction(rarity)
+            await message.set_reaction(reaction=[ReactionTypeEmoji(emoji=reaction_emoji)])
+        except Exception as e:
+            app_logger.debug(f"Could not set reaction: {e}")
+    
+    # Update drop message
+    try:
+        await context.bot.edit_message_caption(
+            chat_id=chat.id,
+            message_id=drop["message_id"],
+            caption=format_caught_caption(card, user.first_name, user.id),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except TelegramError:
+        pass
+    
+    emoji = RARITY_EMOJIS.get(rarity, "☘️")
+    app_logger.info(f"🎯 {user.first_name} caught {character} ({emoji}) in {chat.id}")
+    
+    # Cleanup after delay
+    async def cleanup():
+        await asyncio.sleep(30)
+        if chat.id in active_drops and active_drops[chat.id].get("caught_by"):
+            del active_drops[chat.id]
+    
+    asyncio.create_task(cleanup())
+
+
+async def forcedrop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /forcedrop command."""
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    log_command(user.id, "forcedrop", chat.id)
+    
+    if not Config.is_admin(user.id):
+        await update.message.reply_text("🚫 Admin only.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("❌ Groups only.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    # Check existing drop
+    if chat.id in active_drops and not active_drops[chat.id].get("caught_by"):
+        await update.message.reply_text(
+            "⚠️ Active drop exists!\n\nUse `/cleardrop` first.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    await update.message.reply_text("🎲 Forcing drop...", parse_mode=ParseMode.MARKDOWN)
+    
+    if await spawn_card_drop(context, chat.id, chat.title):
+        app_logger.info(f"🎲 Force drop by {user.id} in {chat.id}")
+    else:
+        await update.message.reply_text("❌ Failed. Check if cards exist.", parse_mode=ParseMode.MARKDOWN)
+
+
+async def cleardrop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /cleardrop command."""
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    log_command(user.id, "cleardrop", chat.id)
+    
+    if not Config.is_admin(user.id):
+        await update.message.reply_text("🚫 Admin only.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("❌ Groups only.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if chat.id not in active_drops:
+        await update.message.reply_text("❌ No active drop.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    del active_drops[chat.id]
+    await update.message.reply_text("✅ Drop cleared!", parse_mode=ParseMode.MARKDOWN)
+    app_logger.info(f"🗑️ Drop cleared by {user.id} in {chat.id}")
+
+
+async def dropstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /dropstats command."""
+    user = update.effective_user
+    
+    log_command(user.id, "dropstats", update.effective_chat.id)
+    
+    if not Config.is_admin(user.id):
+        await update.message.reply_text("🚫 Admin only.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    try:
+        groups = await db.fetch(
+            """
+            SELECT group_id, group_name, drop_threshold, message_count, total_catches
+            FROM groups WHERE drop_enabled = TRUE
+            ORDER BY total_catches DESC LIMIT 10
+            """
+        )
+    except Exception as e:
+        error_logger.error(f"Dropstats failed: {e}")
+        await update.message.reply_text("❌ Failed to fetch.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if not groups:
+        await update.message.reply_text("📊 No active groups.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    lines = []
+    for i, g in enumerate(groups, 1):
+        name = (g.get("group_name") or "Unknown")[:15]
+        catches = g.get("total_catches") or 0
+        lines.append(f"{i}. {name} • 🎯 {catches}")
+    
+    active_count = len([d for d in active_drops.values() if not d.get("caught_by")])
+    
+    await update.message.reply_text(
+        f"📊 *Drop Stats*\n\n"
+        f"🌐 Groups: `{len(groups)}`\n"
+        f"🎴 Active drops: `{active_count}`\n\n"
+        f"*Top Groups:*\n" + "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+# ============================================================
+# 💬 Message Counter Handler
+# ============================================================
+
+async def message_counter_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Count messages for auto-drops."""
+    chat = update.effective_chat
+    
+    if not chat or chat.type not in ["group", "supergroup"]:
+        return
+    
+    # Skip bots
+    if update.effective_user and update.effective_user.is_bot:
+        return
+    
+    # Skip commands
+    if update.message and update.message.text and update.message.text.startswith('/'):
+        return
+    
+    # Skip if active drop
+    if chat.id in active_drops and not active_drops[chat.id].get("caught_by"):
+        return
+    
+    # Skip if processing
+    if drop_locks.get(chat.id, False):
+        return
+    
+    try:
+        await ensure_group_exists(chat.id, chat.title)
+        new_count = await increment_message_count(chat.id)
+        settings = await get_group_drop_settings(chat.id)
+        
+        if new_count >= settings["threshold"]:
+            if await spawn_card_drop(context, chat.id, chat.title):
+                app_logger.info(f"🎴 Auto-drop in {chat.id} ({new_count}/{settings['threshold']})")
+    except Exception as e:
+        error_logger.error(f"Message counter error: {e}")
+
+
+# ============================================================
+# 🔧 Handler Exports
+# ============================================================
+
+setdrop_handler = CommandHandler("setdrop", setdrop_command)
+droptime_handler = CommandHandler("droptime", droptime_command)
+lulucatch_handler = CommandHandler("lulucatch", lulucatch_command)
+forcedrop_handler = CommandHandler("forcedrop", forcedrop_command)
+cleardrop_handler = CommandHandler("cleardrop", cleardrop_command)
+dropstats_handler = CommandHandler("dropstats", dropstats_command)
+
+message_counter = MessageHandler(
+    filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
+    message_counter_handler
+)
+
+# Export list
+drop_handlers = [
+    setdrop_handler,
+    droptime_handler,
+    lulucatch_handler,
+    forcedrop_handler,
+    cleardrop_handler,
+    dropstats_handler,
+    message_counter
+]
