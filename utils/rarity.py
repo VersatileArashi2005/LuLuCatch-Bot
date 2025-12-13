@@ -1,7 +1,7 @@
 # ============================================================
 # 📁 File: utils/rarity.py  
 # 📍 Location: telegram_card_bot/utils/rarity.py
-# 📝 Description: Rarity system with probability-based selection
+# 📝 Description: Rarity system with updated emojis
 # ============================================================
 
 import random
@@ -11,16 +11,7 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class Rarity:
-    """
-    Represents a card rarity level.
-    
-    Attributes:
-        id: Unique identifier for the rarity
-        name: Display name
-        emoji: Emoji representation
-        probability: Chance of getting this rarity (percentage)
-        color_hex: Hex color code for display purposes
-    """
+    """Represents a card rarity level."""
     id: int
     name: str
     emoji: str
@@ -31,7 +22,6 @@ class Rarity:
         return f"{self.emoji} {self.name}"
     
     def to_dict(self) -> dict:
-        """Convert to dictionary representation."""
         return {
             "id": self.id,
             "name": self.name,
@@ -42,86 +32,86 @@ class Rarity:
 
 
 # ============================================================
-# 🎴 Complete Rarity Table
+# 🎴 Updated Rarity Table
 # ============================================================
 
 RARITY_TABLE: dict[int, Rarity] = {
     1: Rarity(
         id=1,
         name="Normal",
-        emoji="🛞",
+        emoji="☘️",
         probability=50.0,
-        color_hex="#808080"  # Gray
+        color_hex="#808080"
     ),
     2: Rarity(
         id=2,
         name="Common",
-        emoji="🌀",
+        emoji="⚡",
         probability=20.0,
-        color_hex="#00BFFF"  # Deep Sky Blue
+        color_hex="#00BFFF"
     ),
     3: Rarity(
         id=3,
         name="Uncommon",
-        emoji="🥏",
+        emoji="⭐",
         probability=10.0,
-        color_hex="#32CD32"  # Lime Green
+        color_hex="#32CD32"
     ),
     4: Rarity(
         id=4,
         name="Rare",
-        emoji="☘️",
+        emoji="💠",
         probability=7.0,
-        color_hex="#228B22"  # Forest Green
+        color_hex="#228B22"
     ),
     5: Rarity(
         id=5,
         name="Epic",
-        emoji="🫧",
+        emoji="🔮",
         probability=4.0,
-        color_hex="#9932CC"  # Dark Orchid
+        color_hex="#9932CC"
     ),
     6: Rarity(
         id=6,
-        name="Limited Edition",
-        emoji="🎐",
+        name="Limited Epic",
+        emoji="🧿",
         probability=2.0,
-        color_hex="#FF69B4"  # Hot Pink
+        color_hex="#FF69B4"
     ),
     7: Rarity(
         id=7,
         name="Platinum",
-        emoji="❄️",
+        emoji="🪩",
         probability=1.0,
-        color_hex="#E5E4E2"  # Platinum
+        color_hex="#E5E4E2"
     ),
     8: Rarity(
         id=8,
         name="Emerald",
-        emoji="💎",
+        emoji="💠",
         probability=0.5,
-        color_hex="#50C878"  # Emerald
+        color_hex="#50C878"
     ),
     9: Rarity(
         id=9,
         name="Crystal",
-        emoji="🌸",
+        emoji="❄️",
         probability=0.3,
-        color_hex="#FFB7C5"  # Cherry Blossom Pink
+        color_hex="#A7D8DE"
     ),
     10: Rarity(
         id=10,
         name="Mythical",
-        emoji="🧿",
+        emoji="🏵️",
         probability=0.15,
-        color_hex="#4169E1"  # Royal Blue
+        color_hex="#4169E1"
     ),
     11: Rarity(
         id=11,
         name="Legendary",
-        emoji="⚡",
+        emoji="🌸",
         probability=0.05,
-        color_hex="#FFD700"  # Gold
+        color_hex="#FFD700"
     ),
 }
 
@@ -131,56 +121,19 @@ RARITY_TABLE: dict[int, Rarity] = {
 # ============================================================
 
 def rarity_to_text(rarity_id: int) -> tuple[str, float, str]:
-    """
-    Convert a rarity ID to its text representation.
-    
-    Args:
-        rarity_id: The rarity ID to look up
-        
-    Returns:
-        Tuple of (name, probability, emoji)
-        
-    Raises:
-        ValueError: If rarity_id is not valid
-        
-    Example:
-        >>> name, prob, emoji = rarity_to_text(4)
-        >>> print(f"{emoji} {name} ({prob}%)")
-        ☘️ Rare (7.0%)
-    """
+    """Convert rarity ID to (name, probability, emoji)."""
     if rarity_id not in RARITY_TABLE:
-        raise ValueError(f"Invalid rarity ID: {rarity_id}. Valid IDs: 1-{len(RARITY_TABLE)}")
+        raise ValueError(f"Invalid rarity ID: {rarity_id}")
     
     rarity = RARITY_TABLE[rarity_id]
     return rarity.name, rarity.probability, rarity.emoji
 
 
 def get_random_rarity() -> int:
-    """
-    Get a random rarity ID based on probability weights.
-    
-    Uses weighted random selection where lower probability
-    rarities are less likely to be selected.
-    
-    Returns:
-        A rarity ID (1-11) selected based on probability
-        
-    Example:
-        >>> rarity_id = get_random_rarity()
-        >>> name, prob, emoji = rarity_to_text(rarity_id)
-        >>> print(f"Got {emoji} {name}!")
-    """
-    # Extract IDs and probabilities
+    """Get random rarity based on probability weights."""
     rarity_ids = list(RARITY_TABLE.keys())
     probabilities = [RARITY_TABLE[rid].probability for rid in rarity_ids]
     
-    # Normalize probabilities to sum to 100 (in case they don't)
-    total_prob = sum(probabilities)
-    if total_prob != 100:
-        # Weights don't need to sum to 100 for random.choices
-        pass
-    
-    # Use weighted random selection
     selected = random.choices(
         population=rarity_ids,
         weights=probabilities,
@@ -191,45 +144,21 @@ def get_random_rarity() -> int:
 
 
 def get_rarity_emoji(rarity_id: int) -> str:
-    """
-    Get just the emoji for a rarity.
-    
-    Args:
-        rarity_id: The rarity ID
-        
-    Returns:
-        The emoji string
-    """
+    """Get emoji for a rarity."""
     if rarity_id not in RARITY_TABLE:
         return "❓"
     return RARITY_TABLE[rarity_id].emoji
 
 
 def get_rarity_name(rarity_id: int) -> str:
-    """
-    Get just the name for a rarity.
-    
-    Args:
-        rarity_id: The rarity ID
-        
-    Returns:
-        The rarity name
-    """
+    """Get name for a rarity."""
     if rarity_id not in RARITY_TABLE:
         return "Unknown"
     return RARITY_TABLE[rarity_id].name
 
 
 def get_rarity_by_name(name: str) -> Optional[Rarity]:
-    """
-    Find a rarity by its name (case-insensitive).
-    
-    Args:
-        name: The rarity name to search for
-        
-    Returns:
-        The Rarity object if found, None otherwise
-    """
+    """Find rarity by name (case-insensitive)."""
     name_lower = name.lower()
     for rarity in RARITY_TABLE.values():
         if rarity.name.lower() == name_lower:
@@ -238,26 +167,12 @@ def get_rarity_by_name(name: str) -> Optional[Rarity]:
 
 
 def get_all_rarities() -> list[Rarity]:
-    """
-    Get all rarities sorted by ID.
-    
-    Returns:
-        List of all Rarity objects
-    """
+    """Get all rarities sorted by ID."""
     return [RARITY_TABLE[i] for i in sorted(RARITY_TABLE.keys())]
 
 
 def format_rarity_display(rarity_id: int, include_probability: bool = False) -> str:
-    """
-    Format a rarity for display in messages.
-    
-    Args:
-        rarity_id: The rarity ID
-        include_probability: Whether to include the probability percentage
-        
-    Returns:
-        Formatted string like "⚡ Legendary" or "⚡ Legendary (0.05%)"
-    """
+    """Format rarity for display."""
     if rarity_id not in RARITY_TABLE:
         return "❓ Unknown"
     
@@ -270,15 +185,7 @@ def format_rarity_display(rarity_id: int, include_probability: bool = False) -> 
 
 
 def get_rarity_tier(rarity_id: int) -> str:
-    """
-    Get the tier classification for a rarity.
-    
-    Args:
-        rarity_id: The rarity ID
-        
-    Returns:
-        Tier string: "common", "rare", "epic", or "legendary"
-    """
+    """Get tier classification for a rarity."""
     if rarity_id <= 2:
         return "common"
     elif rarity_id <= 5:
@@ -290,38 +197,16 @@ def get_rarity_tier(rarity_id: int) -> str:
 
 
 def calculate_rarity_value(rarity_id: int, base_value: int = 100) -> int:
-    """
-    Calculate a value score based on rarity.
-    
-    Higher rarities have exponentially higher values.
-    
-    Args:
-        rarity_id: The rarity ID
-        base_value: Base value for Normal rarity
-        
-    Returns:
-        Calculated value as integer
-    """
+    """Calculate value score based on rarity."""
     if rarity_id not in RARITY_TABLE:
         return base_value
     
-    # Value increases exponentially with rarity
-    # Normal (1) = 100, Legendary (11) ≈ 100,000
     multiplier = 2 ** (rarity_id - 1)
     return base_value * multiplier
 
 
-# ============================================================
-# 📊 Statistics Functions
-# ============================================================
-
 def get_rarity_statistics() -> dict:
-    """
-    Get statistics about the rarity system.
-    
-    Returns:
-        Dictionary with stats about probabilities and tiers
-    """
+    """Get statistics about the rarity system."""
     total_probability = sum(r.probability for r in RARITY_TABLE.values())
     
     tier_stats = {
@@ -346,12 +231,7 @@ def get_rarity_statistics() -> dict:
 
 
 def print_rarity_table() -> str:
-    """
-    Generate a formatted table of all rarities.
-    
-    Returns:
-        Formatted string table for display
-    """
+    """Generate formatted table of all rarities."""
     lines = [
         "╔════╦════════════════════╦═══════╦════════════╗",
         "║ ID ║ Rarity             ║ Emoji ║ Probability║",
@@ -366,34 +246,3 @@ def print_rarity_table() -> str:
     lines.append("╚════╩════════════════════╩═══════╩════════════╝")
     
     return "\n".join(lines)
-
-
-# ============================================================
-# 🧪 Testing/Demo
-# ============================================================
-
-if __name__ == "__main__":
-    # Demo the rarity system
-    print("\n🎴 Rarity System Demo\n")
-    print(print_rarity_table())
-    
-    print("\n📊 Simulating 10,000 pulls...\n")
-    
-    # Simulate pulls
-    results: dict[int, int] = {i: 0 for i in range(1, 12)}
-    num_simulations = 10000
-    
-    for _ in range(num_simulations):
-        rarity_id = get_random_rarity()
-        results[rarity_id] += 1
-    
-    print("Results:")
-    print("-" * 50)
-    for rarity_id, count in results.items():
-        rarity = RARITY_TABLE[rarity_id]
-        percentage = (count / num_simulations) * 100
-        bar = "█" * int(percentage / 2)
-        print(
-            f"{rarity.emoji} {rarity.name:18} | "
-            f"{count:5} ({percentage:5.2f}%) {bar}"
-        )
