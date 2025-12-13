@@ -35,11 +35,13 @@ from commands.leaderboard import (
     top_command,
 )
 
-# Trading system
+# Trading system (updated)
 from commands.trade import (
     register_trade_handlers,
     trades_command,
-    offertrade_command,
+    gift_command,
+    trade_command,
+    offer_command,
     canceltrade_command,
 )
 
@@ -61,25 +63,27 @@ __all__ = [
     "register_collection_handlers",  # Backward compatibility
     "harem_command",
     "inline_collection_handler",
-    
+
     # Card Info
     "register_cardinfo_handlers",
     "cardinfo_command",
     "show_card_info",
     "quick_card_view",
-    
+
     # Leaderboard
     "register_leaderboard_handlers",
     "leaderboard_command",
     "stats_command",
     "top_command",
-    
-    # Trading
+
+    # Trading (updated)
     "register_trade_handlers",
     "trades_command",
-    "offertrade_command",
+    "gift_command",
+    "trade_command",
+    "offer_command",
     "canceltrade_command",
-    
+
     # Inline Search
     "register_inline_handlers",
     "register_inline_callback_handlers",
