@@ -1,39 +1,106 @@
 # ============================================================
 # 📁 File: commands/__init__.py
 # 📍 Location: telegram_card_bot/commands/__init__.py
-# 📝 Description: Commands package initialization
+# 📝 Description: Commands package with all handler exports
 # ============================================================
 
-# Import all command handlers for easy access
+"""
+LuLuCatch Commands Package
+All command handlers for the bot.
+"""
 
-from .harem import register_harem_handlers
+# Harem (collection viewing with inline support)
+from commands.harem import (
+    register_harem_handlers,
+    harem_command,
+    inline_collection_handler,
+)
 
 # Backward compatibility alias
 register_collection_handlers = register_harem_handlers
 
-from .cardinfo import register_cardinfo_handlers
-from .trade import register_trade_handlers
-from .leaderboard import register_leaderboard_handlers
-from .inline_search import (
-    register_inline_handlers,
-    register_inline_callback_handlers,
+# Card info
+from commands.cardinfo import (
+    register_cardinfo_handlers,
+    cardinfo_command,
+    show_card_info,
+    quick_card_view,
 )
 
+# Leaderboard and stats
+from commands.leaderboard import (
+    register_leaderboard_handlers,
+    leaderboard_command,
+    stats_command,
+    top_command,
+)
+
+# Trading system
+from commands.trade import (
+    register_trade_handlers,
+    trades_command,
+    offertrade_command,
+    canceltrade_command,
+)
+
+# Inline search
+from commands.inline_search import (
+    register_inline_handlers,
+    register_inline_callback_handlers,
+    inline_query_handler,
+)
+
+
+# ============================================================
+# 📦 All Exports
+# ============================================================
+
 __all__ = [
-    # Harem (replaces collection)
+    # Harem/Collection
     "register_harem_handlers",
     "register_collection_handlers",  # Backward compatibility
+    "harem_command",
+    "inline_collection_handler",
     
-    # Card info
+    # Card Info
     "register_cardinfo_handlers",
-    
-    # Trading
-    "register_trade_handlers",
+    "cardinfo_command",
+    "show_card_info",
+    "quick_card_view",
     
     # Leaderboard
     "register_leaderboard_handlers",
+    "leaderboard_command",
+    "stats_command",
+    "top_command",
     
-    # Inline search
+    # Trading
+    "register_trade_handlers",
+    "trades_command",
+    "offertrade_command",
+    "canceltrade_command",
+    
+    # Inline Search
     "register_inline_handlers",
     "register_inline_callback_handlers",
+    "inline_query_handler",
 ]
+
+
+# ============================================================
+# 🔧 Convenience Function
+# ============================================================
+
+def register_all_command_handlers(application) -> None:
+    """
+    Register all command handlers at once.
+    
+    Args:
+        application: Telegram bot Application instance
+    """
+    register_harem_handlers(application)
+    register_cardinfo_handlers(application)
+    register_leaderboard_handlers(application)
+    register_trade_handlers(application)
+    register_inline_handlers(application)
+    register_inline_callback_handlers(application)
