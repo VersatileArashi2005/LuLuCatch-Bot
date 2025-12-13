@@ -519,3 +519,344 @@ async def handle_battle_expiration(context, user_id: int, message_id: int, chat_
                 )
             except TelegramError:
                 pass
+
+
+# ============================================================
+# ⚔️ Battle Callback Handler
+# ============================================================
+
+async def battle_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle battle callbacks with anti-cheat and auto-reactions."""
+    query = update.callback_query
+    user = query.from_user
+    data = query.data
+    
+    # Rate limit check
+    is_allowed, violations = anti_cheat.check_rate_limit(user.id)
+    if not is_allowed:
+        anti_cheat.record_violation(user.id, user.username or "", user.first_name or "", "RATE_LIMIT")
+        await query.answer("🚫 Too fast! Slow down.", show_alert=True)
+        return
+    
+    # Check ban
+    if anti_cheat.is_user_banned(user.id):
+        await query.answer("🚫 Banned for cheating!", show_alert=True)
+        return
+    
+    await query.answer()
+    
+    # Handle flee
+    if data.startswith("cf_"):
+        await handle_flee(update, context, data)
+        return
+    
+    # Handle battle
+    if data.startswith("cb_"):
+        await handle_battle(update, context, data)
+        return
+
+
+async def handle_flee(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    """Handle flee action."""
+    query = update.callback_query
+    user = query.from_user
+    
+    try:
+        parts = data.split("_")
+        owner_id = int(parts[1])
+        token = parts[2]
+    except (IndexError, ValueError):
+        await query.answer("❌ Invalid action", show_alert=True)
+        return
+    
+    # Verify owner
+    if user.id != owner_id:
+        anti_cheat.record_violation(user.id, user.username or "", user.first_name or "", "UNAUTHORIZED_CLICK")
+        await query.answer("❌ Not your battle!", show_alert=True)
+        return
+    
+    # Validate token
+    if not anti_cheat.validate_and_consume_token(token):
+        await query.answer("❌ Expired!", show_alert=True)
+        return
+    
+    # Complete as loss
+    catch_manager.complete_battle(user.id, won=False)
+    
+    try:
+        await query.message.delete()
+    except TelegramError:
+        try:
+            await query.edit_message_caption(
+                caption="🏃 *You fled!*",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=None
+            )
+        except TelegramError:
+            pass
+
+
+async def handle_battle(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    """Handle battle action with auto-reactions."""
+    query = update.callback_query
+    user = query.from_user
+    
+    try:
+        parts = data.split("_")
+        owner_id = int(parts[1])
+        card_id = int(parts[2])
+        token = parts[3]
+    except (IndexError, ValueError):
+        await query.answer("❌ Invalid action", show_alert=True)
+        return
+    
+    # Verify owner
+    if user.id != owner_id:
+        anti_cheat.record_violation(user.id, user.username or "", user.first_name or "", "UNAUTHORIZED_BATTLE")
+        await query.answer("❌ Not your battle!", show_alert=True)
+        return
+    
+    # Get lock for atomic operation
+    lock = anti_cheat.get_user_lock(user.id)
+    
+    async with lock:
+        # Check if already processed
+        if anti_cheat.is_battle_processed(user.id, token):
+            anti_cheat.record_violation(user.id, user.username or "", user.first_name or "", "DUPLICATE_BATTLE")
+            await query.answer("❌ Already processed!", show_alert=True)
+            return
+        
+        # Validate token
+        if not anti_cheat.validate_and_consume_token(token):
+            await query.answer("❌ Invalid or expired!", show_alert=True)
+            return
+        
+        # Mark as processed
+        anti_cheat.mark_battle_processed(user.id, token)
+        
+        # Get battle
+        battle = catch_manager.get_battle(user.id)
+        if not battle:
+            await query.answer("⏳ Battle expired!", show_alert=True)
+            return
+        
+        if battle.card_id != card_id:
+            await query.answer("❌ Card mismatch!", show_alert=True)
+            return
+        
+        # Execute battle
+        await execute_battle(update, context, battle)
+
+
+async def execute_battle(update: Update, context: ContextTypes.DEFAULT_TYPE, battle: BattleSession) -> None:
+    """Execute battle with dramatic result and auto-reaction."""
+    query = update.callback_query
+    user = query.from_user
+    card = battle.card_data
+    
+    character = card["character_name"]
+    anime = card["anime"]
+    rarity = card["rarity"]
+    
+    rarity_name, prob, rarity_emoji = rarity_to_text(rarity)
+    win_chance = calculate_win_chance(rarity)
+    coin_reward = get_coin_reward(rarity)
+    xp_reward = get_xp_reward(rarity)
+    
+    # Show battle animation
+    try:
+        await query.edit_message_caption(
+            caption=(
+                f"⚔️ *BATTLE!*\n\n"
+                f"*{user.first_name}* vs *{character}*\n\n"
+                f"🎲 Rolling... ({win_chance}%)"
+            ),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=None
+        )
+    except TelegramError:
+        pass
+    
+    # Brief pause for drama
+    await asyncio.sleep(1.2)
+    
+    # Determine outcome
+    roll = random.randint(1, 100)
+    won = roll <= win_chance
+    
+    # Complete battle
+    if not catch_manager.complete_battle(user.id, won):
+        return
+    
+    stats = catch_manager.get_user_stats(user.id)
+    
+    if won:
+        # === VICTORY ===
+        
+        # Check if new card
+        already_owned = await check_user_has_card(None, user.id, battle.card_id)
+        is_new = not already_owned
+        
+        # Add to collection
+        try:
+            await add_to_collection(None, user.id, battle.card_id, battle.chat_id)
+            await increment_card_caught(None, battle.card_id)
+            await update_user_stats(None, user.id, coins_delta=coin_reward, xp_delta=xp_reward, catches_delta=1)
+            log_card_catch(user.id, character, rarity_name)
+        except Exception as e:
+            error_logger.error(f"Failed to add card: {e}")
+        
+        # Build victory message
+        streak_text = ""
+        if stats["streak"] >= 3:
+            streak_text = f"\n🔥 *{stats['streak']} Win Streak!*"
+        
+        new_badge = "🆕 " if is_new else ""
+        celebrate = should_celebrate(rarity)
+        
+        if celebrate:
+            # Special celebration for rare cards
+            result_caption = (
+                f"🎊 {rarity_emoji} *{rarity_name.upper()} CATCH!* {rarity_emoji} 🎊\n\n"
+                f"*{user.first_name}* caught *{character}*!\n\n"
+                f"🎬 {anime}\n"
+                f"{rarity_emoji} {rarity_name} ({prob}%)\n"
+                f"💰 +{coin_reward:,} coins\n"
+                f"✨ +{xp_reward} XP\n"
+                f"🆔 `#{battle.card_id}`{streak_text}\n\n"
+                f"🏆 *Congratulations!*"
+            )
+        else:
+            result_caption = (
+                f"{new_badge}{rarity_emoji} *{user.first_name}* caught *{character}*!\n\n"
+                f"🎬 {anime}\n"
+                f"{rarity_emoji} {rarity_name}\n"
+                f"💰 +{coin_reward:,} coins\n"
+                f"🆔 `#{battle.card_id}`{streak_text}"
+            )
+        
+        app_logger.info(f"🏆 {user.first_name} caught {character} ({rarity_emoji})")
+        
+        # Update message
+        try:
+            await query.edit_message_caption(
+                caption=result_caption,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=None
+            )
+            
+            # === AUTO-REACTION ===
+            # Send reaction based on rarity
+            await send_catch_reaction_safe(query.message, rarity)
+            
+        except TelegramError as e:
+            app_logger.debug(f"Could not update victory message: {e}")
+        
+    else:
+        # === DEFEAT ===
+        
+        result_caption = (
+            f"💀 *DEFEATED!*\n\n"
+            f"*{character}* was too strong!\n\n"
+            f"🎲 Rolled: {roll} (needed ≤{win_chance})\n\n"
+            f"📊 {stats['wins']}W / {stats['losses']}L"
+        )
+        
+        app_logger.info(f"💀 {user.first_name} lost to {character} (rolled {roll}, needed ≤{win_chance})")
+        
+        try:
+            await query.edit_message_caption(
+                caption=result_caption,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=None
+            )
+        except TelegramError:
+            pass
+    
+    # Auto-delete after delay
+    await asyncio.sleep(15)
+    try:
+        await query.message.delete()
+    except TelegramError:
+        pass
+
+
+# ============================================================
+# 🔧 Admin Commands
+# ============================================================
+
+async def reset_cooldown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: Reset user cooldown."""
+    user = update.effective_user
+    
+    if not update.message or not Config.is_admin(user.id):
+        return
+    
+    target_id = user.id
+    if context.args:
+        try:
+            target_id = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("❌ Invalid user ID.")
+            return
+    
+    catch_manager.clear_user_cooldown(target_id)
+    await update.message.reply_text(f"✅ Cooldown cleared for `{target_id}`", parse_mode=ParseMode.MARKDOWN)
+
+
+async def clear_cheat_record_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: Clear cheat record."""
+    user = update.effective_user
+    
+    if not update.message or not Config.is_admin(user.id):
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Usage: `/clearcheat <user_id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID.")
+        return
+    
+    anti_cheat.clear_user_record(target_id)
+    await update.message.reply_text(f"✅ Cheat record cleared for `{target_id}`", parse_mode=ParseMode.MARKDOWN)
+
+
+async def view_cheaters_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: View flagged users."""
+    user = update.effective_user
+    
+    if not update.message or not Config.is_admin(user.id):
+        return
+    
+    records = anti_cheat._cheat_records
+    
+    if not records:
+        await update.message.reply_text("✅ No cheaters detected!")
+        return
+    
+    lines = ["🚨 *Flagged Users*\n"]
+    
+    for uid, record in list(records.items())[:15]:
+        status = "🚫 BANNED" if record.is_banned else "⚠️ Warned"
+        lines.append(f"{status} `{uid}` • {record.violations} violations")
+    
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+# ============================================================
+# 🔧 Handler Exports
+# ============================================================
+
+catch_command_handler = CommandHandler("catch", catch_command)
+force_spawn_handler = CommandHandler("resetcooldown", reset_cooldown_command)
+clear_cheat_handler = CommandHandler("clearcheat", clear_cheat_record_command)
+view_cheaters_handler = CommandHandler("cheaters", view_cheaters_command)
+
+battle_callback = CallbackQueryHandler(battle_callback_handler, pattern=r"^c[bf]_")
+
+# Disabled - not needed for battle system
+name_guess_message_handler = None
