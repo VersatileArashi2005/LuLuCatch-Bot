@@ -77,7 +77,7 @@ from commands.inline_search import (
 from handlers.roles import register_role_handlers
 
 # Import Part 4 handlers
-from commands.collection import register_collection_handlers
+from commands.harem import register_harem_handlers
 from commands.cardinfo import register_cardinfo_handlers
 from commands.trade import register_trade_handlers
 from commands.leaderboard import register_leaderboard_handlers
@@ -356,7 +356,7 @@ async def setup_bot() -> Application:
     # Register Part 4 Handlers
     # ========================================
 
-    register_collection_handlers(application)
+    register_harem_handlers(application)
     register_cardinfo_handlers(application)
     register_trade_handlers(application)
     register_leaderboard_handlers(application)
