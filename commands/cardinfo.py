@@ -1,7 +1,7 @@
 # ============================================================
 # 📁 File: commands/cardinfo.py
 # 📍 Location: telegram_card_bot/commands/cardinfo.py
-# 📝 Description: Detailed card information view with owners and actions
+# 📝 Description: Modern card info view with actions
 # ============================================================
 
 from typing import Optional
@@ -24,20 +24,28 @@ from db import (
     get_card_with_details,
     get_card_owners,
     check_user_owns_card,
+    get_user_card_quantity,
     ensure_user,
 )
 from utils.logger import app_logger, error_logger, log_command
-from utils.rarity import rarity_to_text
+from utils.rarity import rarity_to_text, get_rarity, is_rare_plus
+from utils.constants import (
+    RARITY_EMOJIS,
+    RARITY_NAMES,
+    ButtonLabels,
+    Templates,
+)
+from utils.ui import format_card_caption, format_error
 
 
 # ============================================================
-# 🎴 Card Info Command Handler
+# 🎴 Card Info Command
 # ============================================================
 
 async def cardinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle /cardinfo <card_id> command.
-    Shows detailed information about a specific card.
+    Shows detailed card information with owner stats and actions.
     """
     if not update.message or not update.effective_user:
         return
@@ -56,29 +64,52 @@ async def cardinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         last_name=user.last_name
     )
 
-    # Check DB connection
+    # Check database
     if not db.is_connected:
         await update.message.reply_text(
-            "⚠️ Database is currently offline. Please try again later.",
+            format_error("database"),
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
-    # Check if card ID provided
-    if not context.args or not context.args[0].isdigit():
+    # Check arguments
+    if not context.args:
+        bot_username = context.bot.username or Config.BOT_USERNAME
         await update.message.reply_text(
-            "📝 *Usage:* `/cardinfo <card_id>`\n\n"
-            "Example: `/cardinfo 42`\n\n"
-            "💡 Find card IDs in your collection or inline search.",
+            f"🔍 *Card Info*\n\n"
+            f"Usage: `/cardinfo <card_id>`\n\n"
+            f"Examples:\n"
+            f"• `/cardinfo 42`\n"
+            f"• `/cardinfo 100`\n\n"
+            f"💡 Find card IDs:\n"
+            f"• In your /harem\n"
+            f"• Via inline: `@{bot_username} naruto`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
-    card_id = int(context.args[0])
+    # Parse card ID
+    try:
+        card_id = int(context.args[0].replace("#", ""))
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid card ID. Use a number like `/cardinfo 42`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
 
     # Show card info
-    await show_card_info(update, context, card_id, user.id)
+    await show_card_info(
+        update=update,
+        context=context,
+        card_id=card_id,
+        viewer_user_id=user.id
+    )
 
+
+# ============================================================
+# 📄 Display Card Info
+# ============================================================
 
 async def show_card_info(
     update: Update,
@@ -87,17 +118,9 @@ async def show_card_info(
     viewer_user_id: int,
     from_callback: bool = False
 ) -> None:
-    """
-    Display detailed card information.
+    """Display detailed card information with modern UI."""
     
-    Args:
-        update: Telegram update
-        context: Bot context
-        card_id: Card ID to display
-        viewer_user_id: User viewing the card
-        from_callback: Whether this is from a callback query
-    """
-    # Get card with details
+    # Get card details
     card = await get_card_with_details(None, card_id)
 
     if not card:
@@ -109,56 +132,76 @@ async def show_card_info(
             await update.message.reply_text(error_msg, parse_mode=ParseMode.MARKDOWN)
         return
 
-    # Extract card info
+    # Extract info
     character = card.get("character_name", "Unknown")
     anime = card.get("anime", "Unknown")
     rarity = card.get("rarity", 1)
     photo_file_id = card.get("photo_file_id")
     total_caught = card.get("total_caught", 0)
     unique_owners = card.get("unique_owners", 0)
-    total_in_circulation = card.get("total_in_circulation", 0)
+    total_circulation = card.get("total_in_circulation", 0)
 
-    # Get rarity details
+    # Rarity details
     rarity_name, rarity_prob, rarity_emoji = rarity_to_text(rarity)
+    rarity_obj = get_rarity(rarity)
+
+    # Check viewer ownership
+    viewer_owns = await check_user_owns_card(None, viewer_user_id, card_id)
+    viewer_qty = 0
+    if viewer_owns:
+        viewer_qty = await get_user_card_quantity(None, viewer_user_id, card_id)
 
     # Get top owners
     owners = await get_card_owners(None, card_id, limit=5)
 
-    # Build owners list
+    # Build owners text
     if owners:
-        owners_text = "\n".join([
-            f"  • {owner.get('first_name', 'Unknown')} (x{owner.get('quantity', 1)})"
-            for owner in owners
-        ])
+        owner_lines = []
+        for i, owner in enumerate(owners, 1):
+            name = owner.get("first_name", "Unknown")
+            qty = owner.get("quantity", 1)
+            is_fav = "❤️" if owner.get("is_favorite") else ""
+            owner_lines.append(f"{i}. {name} ×{qty} {is_fav}")
+        owners_text = "\n".join(owner_lines)
     else:
-        owners_text = "  • None yet!"
+        owners_text = "_No owners yet_"
 
-    # Check if viewer owns this card
-    viewer_owns = await check_user_owns_card(None, viewer_user_id, card_id)
+    # Ownership status
+    if viewer_owns:
+        ownership_text = f"✅ You own ×{viewer_qty}"
+    else:
+        ownership_text = "❌ Not in your collection"
 
     # Build caption
     caption = (
         f"{rarity_emoji} *{character}*\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🎬 *Anime:* {anime}\n"
-        f"🆔 *ID:* `#{card_id}`\n"
-        f"✨ *Rarity:* {rarity_emoji} {rarity_name} ({rarity_prob}%)\n"
+        f"{rarity_emoji} *Rarity:* {rarity_name}\n"
         f"📊 *Drop Rate:* {rarity_prob}%\n"
-        f"🎯 *Times Caught:* {total_caught:,}\n"
-        f"👥 *Unique Owners:* {unique_owners:,}\n"
-        f"📦 *In Circulation:* {total_in_circulation:,}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 *Top Owners:*\n{owners_text}"
+        f"🆔 *ID:* `#{card_id}`\n\n"
+        f"📈 *Statistics*\n"
+        f"├ Caught: {total_caught:,} times\n"
+        f"├ Owners: {unique_owners:,} unique\n"
+        f"└ Circulation: {total_circulation:,}\n\n"
+        f"👥 *Top Owners*\n"
+        f"{owners_text}\n\n"
+        f"{ownership_text}"
     )
 
     # Build keyboard
-    keyboard = build_cardinfo_keyboard(card_id, viewer_user_id, viewer_owns)
+    keyboard = build_cardinfo_keyboard(
+        card_id=card_id,
+        viewer_user_id=viewer_user_id,
+        viewer_owns=viewer_owns,
+        anime=anime,
+        bot_username=context.bot.username or Config.BOT_USERNAME
+    )
 
-    # Send message with photo if available
+    # Send message
     if photo_file_id:
         if from_callback and update.callback_query:
-            # Edit existing message (if possible)
             try:
+                # Try to edit media
                 await update.callback_query.edit_message_caption(
                     caption=caption,
                     parse_mode=ParseMode.MARKDOWN,
@@ -166,8 +209,13 @@ async def show_card_info(
                 )
                 await update.callback_query.answer()
             except Exception:
-                # If can't edit (different media), send new message
-                await update.callback_query.message.reply_photo(
+                # Delete and send new if can't edit
+                try:
+                    await update.callback_query.message.delete()
+                except Exception:
+                    pass
+                await context.bot.send_photo(
+                    chat_id=update.callback_query.message.chat_id,
                     photo=photo_file_id,
                     caption=caption,
                     parse_mode=ParseMode.MARKDOWN,
@@ -182,7 +230,7 @@ async def show_card_info(
                 reply_markup=keyboard
             )
     else:
-        # No photo - send text only
+        # No photo
         if from_callback and update.callback_query:
             await update.callback_query.edit_message_text(
                 text=caption,
@@ -198,88 +246,91 @@ async def show_card_info(
             )
 
 
+# ============================================================
+# ⌨️ Keyboard Builder
+# ============================================================
+
 def build_cardinfo_keyboard(
     card_id: int,
     viewer_user_id: int,
-    viewer_owns: bool
+    viewer_owns: bool,
+    anime: str,
+    bot_username: str
 ) -> InlineKeyboardMarkup:
-    """
-    Build action keyboard for card info view.
+    """Build action keyboard for card info."""
     
-    Args:
-        card_id: Card ID
-        viewer_user_id: User viewing the card
-        viewer_owns: Whether the viewer owns this card
-        
-    Returns:
-        InlineKeyboardMarkup with action buttons
-    """
     buttons = []
 
-    # Row 1: Ownership status
+    # Row 1: Actions based on ownership
+    action_row = []
+    
     if viewer_owns:
-        buttons.append([
-            InlineKeyboardButton("✅ You own this card", callback_data="noop")
-        ])
-    else:
-        buttons.append([
-            InlineKeyboardButton("❌ You don't own this card", callback_data="noop")
-        ])
-
-    # Row 2: Actions
-    action_buttons = []
-
-    # Offer trade button
-    action_buttons.append(
-        InlineKeyboardButton("🔁 Offer Trade", callback_data=f"trade_start:{card_id}:{viewer_user_id}")
+        action_row.append(
+            InlineKeyboardButton(
+                "🔄 Offer Trade",
+                callback_data=f"ci_trade:{card_id}"
+            )
+        )
+    
+    # Search similar (same anime)
+    action_row.append(
+        InlineKeyboardButton(
+            "🔍 Same Anime",
+            switch_inline_query_current_chat=anime[:30]
+        )
     )
+    
+    if action_row:
+        buttons.append(action_row)
 
-    # View in bot button
-    action_buttons.append(
-        InlineKeyboardButton("🔍 Search Similar", callback_data=f"search_anime:{card_id}")
-    )
-
-    buttons.append(action_buttons)
-
-    # Row 3: Close button
+    # Row 2: View in collection / Share
     buttons.append([
-        InlineKeyboardButton("❌ Close", callback_data="close")
+        InlineKeyboardButton(
+            "📦 My Collection",
+            switch_inline_query_current_chat=f"collection.{viewer_user_id}"
+        ),
+        InlineKeyboardButton(
+            "📤 Share",
+            switch_inline_query=f"#{card_id}"
+        )
+    ])
+
+    # Row 3: Close
+    buttons.append([
+        InlineKeyboardButton(ButtonLabels.CLOSE, callback_data="ci_close")
     ])
 
     return InlineKeyboardMarkup(buttons)
 
 
 # ============================================================
-# 🔘 Card Info Callback Handler
+# 🔘 Callback Handlers
 # ============================================================
 
 async def cardinfo_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle card info callbacks.
+    """Handle card info callbacks."""
     
-    Patterns:
-    - ci:{card_id} - View card info
-    - close - Close the message
-    """
     query = update.callback_query
-
     if not query or not query.data:
         return
 
     data = query.data
 
-    # Handle close
-    if data == "close":
-        await query.message.delete()
-        await query.answer("Closed")
+    # Close
+    if data == "ci_close":
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await query.answer()
         return
 
-    # Handle noop
+    # Noop
     if data == "noop":
         await query.answer()
         return
 
-    # Handle card info view (ci:{card_id})
+    # View card info: ci:{card_id}
     if data.startswith("ci:"):
         try:
             card_id = int(data.split(":")[1])
@@ -296,13 +347,79 @@ async def cardinfo_callback_handler(update: Update, context: ContextTypes.DEFAUL
             await query.answer("Invalid card ID", show_alert=True)
         return
 
-    # Handle search similar (placeholder)
-    if data.startswith("search_anime:"):
-        await query.answer(
-            "💡 Use inline mode: @" + context.bot.username + " <anime name>",
-            show_alert=True
+    # Trade from cardinfo: ci_trade:{card_id}
+    if data.startswith("ci_trade:"):
+        try:
+            card_id = int(data.split(":")[1])
+            await query.answer(
+                f"💡 To trade card #{card_id}:\n/offertrade {card_id} <user_id>",
+                show_alert=True
+            )
+        except (ValueError, IndexError):
+            await query.answer("Error", show_alert=True)
+        return
+
+
+# ============================================================
+# 🔗 Quick Card View (from other modules)
+# ============================================================
+
+async def quick_card_view(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    card_id: int,
+    viewer_user_id: int
+) -> None:
+    """
+    Quick card view function for use by other modules.
+    Sends card info to specified chat.
+    """
+    card = await get_card_with_details(None, card_id)
+    
+    if not card:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ Card `#{card_id}` not found.",
+            parse_mode=ParseMode.MARKDOWN
         )
         return
+
+    character = card.get("character_name", "Unknown")
+    anime = card.get("anime", "Unknown")
+    rarity = card.get("rarity", 1)
+    photo_file_id = card.get("photo_file_id")
+    
+    rarity_name, prob, emoji = rarity_to_text(rarity)
+    
+    caption = (
+        f"{emoji} *{character}*\n\n"
+        f"🎬 {anime}\n"
+        f"{emoji} {rarity_name} ({prob}%)\n"
+        f"🆔 `#{card_id}`"
+    )
+    
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "📋 Full Details",
+            callback_data=f"ci:{card_id}"
+        )
+    ]])
+    
+    if photo_file_id:
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=photo_file_id,
+            caption=caption,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=caption,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
+        )
 
 
 # ============================================================
@@ -310,24 +427,18 @@ async def cardinfo_callback_handler(update: Update, context: ContextTypes.DEFAUL
 # ============================================================
 
 def register_cardinfo_handlers(application: Application) -> None:
-    """
-    Register card info handlers.
+    """Register card info handlers."""
     
-    Args:
-        application: Telegram bot application
-    """
-    # Command handler
+    # Command
     application.add_handler(CommandHandler("cardinfo", cardinfo_command))
+    application.add_handler(CommandHandler("card", cardinfo_command))  # Alias
 
-    # Callback query handlers
+    # Callbacks
     application.add_handler(
         CallbackQueryHandler(cardinfo_callback_handler, pattern=r"^ci:")
     )
     application.add_handler(
-        CallbackQueryHandler(cardinfo_callback_handler, pattern=r"^close$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(cardinfo_callback_handler, pattern=r"^search_anime:")
+        CallbackQueryHandler(cardinfo_callback_handler, pattern=r"^ci_")
     )
 
     app_logger.info("✅ Card info handlers registered")
