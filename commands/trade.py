@@ -1,10 +1,10 @@
 # ============================================================
 # 📁 File: commands/trade.py
 # 📍 Location: telegram_card_bot/commands/trade.py
-# 📝 Description: Trading system with request/accept/reject flows
+# 📝 Description: Modern trading system with clean UI
 # ============================================================
 
-from typing import Optional
+from typing import Optional, List
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -18,6 +18,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
+from config import Config
 from db import (
     db,
     ensure_user,
@@ -29,34 +30,40 @@ from db import (
     get_card_by_id,
     count_pending_trades,
     transfer_card_between_users,
+    get_user_card_quantity,
 )
 from utils.logger import app_logger, error_logger, log_command
 from utils.rarity import rarity_to_text
+from utils.constants import (
+    RARITY_EMOJIS,
+    ButtonLabels,
+    Pagination,
+    format_number,
+)
+from utils.ui import format_error
 
 
 # ============================================================
 # 📊 Constants
 # ============================================================
 
-MAX_PENDING_TRADES_PER_USER = 5  # Limit active trades
+MAX_PENDING_TRADES = 10
+TRADES_PER_PAGE = Pagination.TRADES_PER_PAGE
 
 
 # ============================================================
-# 🔁 Trades List Command Handler
+# 🔁 Trades List Command
 # ============================================================
 
 async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle /trades command.
-    Shows pending trade requests (received and sent).
-    """
+    """Handle /trades command - shows pending trades."""
+    
     if not update.message or not update.effective_user:
         return
 
     user = update.effective_user
     log_command(user.id, "trades", update.effective_chat.id)
 
-    # Ensure user exists
     await ensure_user(
         pool=None,
         user_id=user.id,
@@ -65,107 +72,129 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         last_name=user.last_name
     )
 
-    # Check DB connection
     if not db.is_connected:
-        await update.message.reply_text(
-            "⚠️ Database is currently offline. Please try again later.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text(format_error("database"))
         return
 
-    # Get pending trades received
-    received_trades = await list_pending_trades_for_user(None, user.id, as_recipient=True, limit=10)
+    await show_trades_list(update, context, user.id)
 
-    # Get pending trades sent
-    sent_trades = await list_pending_trades_for_user(None, user.id, as_recipient=False, limit=10)
+
+async def show_trades_list(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    from_callback: bool = False
+) -> None:
+    """Display trades list with modern UI."""
+    
+    # Get pending trades
+    received = await list_pending_trades_for_user(None, user_id, as_recipient=True, limit=10)
+    sent = await list_pending_trades_for_user(None, user_id, as_recipient=False, limit=10)
+
+    total_pending = len(received) + len(sent)
 
     # Build message
-    text_parts = ["🔁 *Your Trade Requests*\n"]
+    lines = ["🔁 *Your Trades*\n"]
 
     # Received trades
-    if received_trades:
-        text_parts.append("\n📥 *Received* (tap to view):\n")
-        for trade in received_trades[:5]:
+    if received:
+        lines.append(f"📥 *Incoming* ({len(received)})")
+        for trade in received[:5]:
             trade_id = trade.get("id")
-            from_user_name = trade.get("from_user_name", "Unknown")
-            offered_char = trade.get("offered_character", "Unknown")
-            offered_rarity = trade.get("offered_rarity", 1)
+            from_name = trade.get("from_user_name", "Unknown")
+            char = trade.get("offered_character", "Unknown")
+            rarity = trade.get("offered_rarity", 1)
+            emoji = RARITY_EMOJIS.get(rarity, "☘️")
             
-            rarity_emoji = rarity_to_text(offered_rarity)[2]
-            
-            text_parts.append(
-                f"  • From *{from_user_name}*: {rarity_emoji} {offered_char}\n"
-                f"    `/viewtrade {trade_id}`"
-            )
+            lines.append(f"  {emoji} {char}")
+            lines.append(f"  └ from {from_name} • `#{trade_id}`")
+        
+        if len(received) > 5:
+            lines.append(f"  _...and {len(received) - 5} more_")
     else:
-        text_parts.append("\n📥 *Received:* None\n")
+        lines.append("📥 *Incoming:* None")
+
+    lines.append("")
 
     # Sent trades
-    if sent_trades:
-        text_parts.append("\n📤 *Sent* (waiting for reply):\n")
-        for trade in sent_trades[:5]:
+    if sent:
+        lines.append(f"📤 *Outgoing* ({len(sent)})")
+        for trade in sent[:5]:
             trade_id = trade.get("id")
-            to_user_name = trade.get("to_user_name", "Unknown")
-            offered_char = trade.get("offered_character", "Unknown")
-            offered_rarity = trade.get("offered_rarity", 1)
+            to_name = trade.get("to_user_name", "Unknown")
+            char = trade.get("offered_character", "Unknown")
+            rarity = trade.get("offered_rarity", 1)
+            emoji = RARITY_EMOJIS.get(rarity, "☘️")
             
-            rarity_emoji = rarity_to_text(offered_rarity)[2]
-            
-            text_parts.append(
-                f"  • To *{to_user_name}*: {rarity_emoji} {offered_char}\n"
-                f"    `/canceltrade {trade_id}`"
-            )
+            lines.append(f"  {emoji} {char}")
+            lines.append(f"  └ to {to_name} • `#{trade_id}`")
+        
+        if len(sent) > 5:
+            lines.append(f"  _...and {len(sent) - 5} more_")
     else:
-        text_parts.append("\n📤 *Sent:* None\n")
+        lines.append("📤 *Outgoing:* None")
 
-    text_parts.append(
-        "\n━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 Use `/viewtrade <id>` to view details\n"
-        "💡 Offer trades from card info pages"
-    )
+    # Footer
+    lines.append(f"\n📊 {total_pending}/{MAX_PENDING_TRADES} active trades")
 
-    await update.message.reply_text(
-        "".join(text_parts),
-        parse_mode=ParseMode.MARKDOWN
-    )
+    text = "\n".join(lines)
+
+    # Build keyboard
+    buttons = []
+
+    # Quick view buttons for received trades
+    if received:
+        view_row = []
+        for trade in received[:4]:
+            trade_id = trade.get("id")
+            rarity = trade.get("offered_rarity", 1)
+            emoji = RARITY_EMOJIS.get(rarity, "☘️")
+            view_row.append(
+                InlineKeyboardButton(
+                    f"{emoji} #{trade_id}",
+                    callback_data=f"tv:{trade_id}"
+                )
+            )
+        if view_row:
+            buttons.append(view_row)
+
+    # Action buttons
+    buttons.append([
+        InlineKeyboardButton(
+            "📦 My Collection",
+            switch_inline_query_current_chat=f"collection.{user_id}"
+        )
+    ])
+
+    buttons.append([
+        InlineKeyboardButton(ButtonLabels.REFRESH, callback_data="trades_refresh"),
+        InlineKeyboardButton(ButtonLabels.CLOSE, callback_data="trades_close")
+    ])
+
+    keyboard = InlineKeyboardMarkup(buttons)
+
+    # Send or edit
+    if from_callback and update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=keyboard
+            )
+        except Exception:
+            pass
+        await update.callback_query.answer()
+    else:
+        await update.message.reply_text(
+            text=text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
+        )
 
 
 # ============================================================
-# 🔍 View Trade Command Handler
+# 🔍 View Trade Details
 # ============================================================
-
-async def viewtrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle /viewtrade <trade_id> command.
-    Shows detailed trade information with accept/reject buttons.
-    """
-    if not update.message or not update.effective_user:
-        return
-
-    user = update.effective_user
-
-    # Check DB connection
-    if not db.is_connected:
-        await update.message.reply_text(
-            "⚠️ Database is currently offline.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-
-    # Check if trade ID provided
-    if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text(
-            "📝 *Usage:* `/viewtrade <trade_id>`\n\n"
-            "Example: `/viewtrade 42`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-
-    trade_id = int(context.args[0])
-
-    # Show trade details
-    await show_trade_details(update, context, trade_id, user.id)
-
 
 async def show_trade_details(
     update: Update,
@@ -174,79 +203,83 @@ async def show_trade_details(
     viewer_user_id: int,
     from_callback: bool = False
 ) -> None:
-    """
-    Display detailed trade information.
+    """Display detailed trade information."""
     
-    Args:
-        update: Telegram update
-        context: Bot context
-        trade_id: Trade ID to display
-        viewer_user_id: User viewing the trade
-        from_callback: Whether this is from a callback
-    """
-    # Get trade details
     trade = await get_trade(None, trade_id)
 
     if not trade:
-        error_msg = f"❌ Trade `#{trade_id}` not found."
-        
         if from_callback and update.callback_query:
             await update.callback_query.answer("Trade not found!", show_alert=True)
-        else:
-            await update.message.reply_text(error_msg, parse_mode=ParseMode.MARKDOWN)
         return
 
-    # Extract trade info
+    # Extract info
     from_user = trade.get("from_user")
     to_user = trade.get("to_user")
-    from_user_name = trade.get("from_user_name", "Unknown")
-    to_user_name = trade.get("to_user_name", "Unknown")
+    from_name = trade.get("from_user_name", "Unknown")
+    to_name = trade.get("to_user_name", "Unknown")
     status = trade.get("status", "unknown")
 
-    offered_card_id = trade.get("offered_card_id")
+    # Offered card
+    offered_id = trade.get("offered_card_id")
     offered_char = trade.get("offered_character", "Unknown")
     offered_anime = trade.get("offered_anime", "Unknown")
     offered_rarity = trade.get("offered_rarity", 1)
     offered_photo = trade.get("offered_photo")
+    
+    offered_name, offered_prob, offered_emoji = rarity_to_text(offered_rarity)
 
-    requested_card_id = trade.get("requested_card_id")
+    # Requested card (if any)
+    requested_id = trade.get("requested_card_id")
     requested_char = trade.get("requested_character")
-    requested_anime = trade.get("requested_anime")
     requested_rarity = trade.get("requested_rarity")
 
-    # Get rarity details
-    offered_rarity_name, offered_rarity_prob, offered_rarity_emoji = rarity_to_text(offered_rarity)
+    # Status emoji
+    status_emojis = {
+        "pending": "⏳",
+        "accepted": "✅",
+        "rejected": "❌",
+        "cancelled": "🚫",
+        "completed": "✅",
+        "failed": "💥"
+    }
+    status_emoji = status_emojis.get(status, "❓")
 
-    # Build message
-    text_parts = [
-        f"🔁 *Trade Request #{trade_id}*\n\n",
-        f"━━━━━━━━━━━━━━━━━━━━\n",
-        f"👤 *From:* {from_user_name}\n",
-        f"👤 *To:* {to_user_name}\n",
-        f"📊 *Status:* {status.upper()}\n\n",
-        f"📤 *Offered:*\n",
-        f"  {offered_rarity_emoji} *{offered_char}*\n",
-        f"  🎬 _{offered_anime}_\n",
-        f"  🆔 `#{offered_card_id}` • {offered_rarity_name} ({offered_rarity_prob}%)\n",
+    # Build caption
+    lines = [
+        f"🔁 *Trade #{trade_id}*",
+        f"{status_emoji} Status: {status.upper()}",
+        "",
+        f"👤 *From:* {from_name}",
+        f"👤 *To:* {to_name}",
+        "",
+        f"📤 *Offering:*",
+        f"{offered_emoji} *{offered_char}*",
+        f"└ {offered_anime} • {offered_name}",
     ]
 
-    if requested_card_id:
-        requested_rarity_name, requested_rarity_prob, requested_rarity_emoji = rarity_to_text(requested_rarity)
-        text_parts.append(
-            f"\n📥 *Requested:*\n"
-            f"  {requested_rarity_emoji} *{requested_char}*\n"
-            f"  🎬 _{requested_anime}_\n"
-            f"  🆔 `#{requested_card_id}` • {requested_rarity_name} ({requested_rarity_prob}%)\n"
-        )
+    if requested_id and requested_char:
+        req_name, _, req_emoji = rarity_to_text(requested_rarity)
+        lines.extend([
+            "",
+            f"📥 *Requesting:*",
+            f"{req_emoji} *{requested_char}*",
+        ])
     else:
-        text_parts.append("\n📥 *Requested:* Any card (gift)\n")
+        lines.extend([
+            "",
+            f"📥 *Requesting:* 🎁 Gift (no return)",
+        ])
 
-    text_parts.append(f"━━━━━━━━━━━━━━━━━━━━\n")
+    caption = "\n".join(lines)
 
-    caption = "".join(text_parts)
-
-    # Build keyboard based on viewer role and status
-    keyboard = build_trade_keyboard(trade_id, viewer_user_id, from_user, to_user, status)
+    # Build keyboard based on viewer and status
+    keyboard = build_trade_detail_keyboard(
+        trade_id=trade_id,
+        viewer_user_id=viewer_user_id,
+        from_user=from_user,
+        to_user=to_user,
+        status=status
+    )
 
     # Send with photo if available
     if offered_photo and not from_callback:
@@ -257,7 +290,6 @@ async def show_trade_details(
             reply_markup=keyboard
         )
     else:
-        # Text only or callback edit
         if from_callback and update.callback_query:
             try:
                 await update.callback_query.edit_message_text(
@@ -265,14 +297,19 @@ async def show_trade_details(
                     parse_mode=ParseMode.MARKDOWN,
                     reply_markup=keyboard
                 )
-                await update.callback_query.answer()
             except Exception:
-                await update.callback_query.message.reply_text(
-                    text=caption,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=keyboard
-                )
-                await update.callback_query.answer()
+                # If there was a photo, delete and send new
+                try:
+                    await update.callback_query.message.delete()
+                    await context.bot.send_message(
+                        chat_id=update.callback_query.message.chat_id,
+                        text=caption,
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=keyboard
+                    )
+                except Exception:
+                    pass
+            await update.callback_query.answer()
         else:
             await update.message.reply_text(
                 text=caption,
@@ -281,166 +318,138 @@ async def show_trade_details(
             )
 
 
-def build_trade_keyboard(
+def build_trade_detail_keyboard(
     trade_id: int,
     viewer_user_id: int,
     from_user: int,
     to_user: int,
     status: str
 ) -> InlineKeyboardMarkup:
-    """
-    Build action keyboard for trade view.
+    """Build trade detail action keyboard."""
     
-    Args:
-        trade_id: Trade ID
-        viewer_user_id: User viewing
-        from_user: Trade sender
-        to_user: Trade recipient
-        status: Trade status
-        
-    Returns:
-        InlineKeyboardMarkup with appropriate action buttons
-    """
     buttons = []
 
     if status == "pending":
-        # Recipient can accept/reject
+        # Recipient actions
         if viewer_user_id == to_user:
             buttons.append([
-                InlineKeyboardButton("✅ Accept", callback_data=f"trade_accept:{trade_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"trade_reject:{trade_id}"),
+                InlineKeyboardButton(
+                    "✅ Accept",
+                    callback_data=f"ta:{trade_id}"
+                ),
+                InlineKeyboardButton(
+                    "❌ Reject",
+                    callback_data=f"tr:{trade_id}"
+                )
             ])
         
-        # Sender can cancel
+        # Sender actions
         elif viewer_user_id == from_user:
             buttons.append([
-                InlineKeyboardButton("🚫 Cancel Trade", callback_data=f"trade_cancel:{trade_id}"),
+                InlineKeyboardButton(
+                    "🚫 Cancel Trade",
+                    callback_data=f"tc:{trade_id}"
+                )
             ])
-    
-    # Close button for everyone
+
+    # Back to list
     buttons.append([
-        InlineKeyboardButton("❌ Close", callback_data="close")
+        InlineKeyboardButton(
+            "📋 All Trades",
+            callback_data="trades_refresh"
+        ),
+        InlineKeyboardButton(
+            ButtonLabels.CLOSE,
+            callback_data="trades_close"
+        )
     ])
 
     return InlineKeyboardMarkup(buttons)
 
 
 # ============================================================
-# 🔁 Trade Start Callback Handler
-# ============================================================
-
-async def trade_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle trade_start:{card_id}:{viewer_user_id} callback.
-    Initiates a trade offer for a card.
-    """
-    query = update.callback_query
-
-    if not query or not query.data:
-        return
-
-    try:
-        parts = query.data.split(":")
-        card_id = int(parts[1])
-        viewer_user_id = int(parts[2])
-        
-    except (ValueError, IndexError):
-        await query.answer("Invalid data", show_alert=True)
-        return
-
-    # For now, we'll create a simple gift trade (no requested card)
-    # In a full implementation, you'd ask the user to select a card to request
-
-    # Check if user owns the card
-    owns_card = await check_user_owns_card(None, query.from_user.id, card_id)
-
-    if not owns_card:
-        await query.answer(
-            "❌ You don't own this card!\nYou can only trade cards you own.",
-            show_alert=True
-        )
-        return
-
-    # Check pending trade limit
-    pending_count = await count_pending_trades(None, query.from_user.id)
-
-    if pending_count >= MAX_PENDING_TRADES_PER_USER:
-        await query.answer(
-            f"⚠️ You have reached the limit of {MAX_PENDING_TRADES_PER_USER} pending trades.\n"
-            "Please complete or cancel some trades first.",
-            show_alert=True
-        )
-        return
-
-    # For this simple implementation, we'll assume the viewer_user_id is the recipient
-    # In a full implementation, you'd let the user select the recipient
-
-    # Get card info
-    card = await get_card_by_id(None, card_id)
-    if not card:
-        await query.answer("Card not found!", show_alert=True)
-        return
-
-    character = card.get("character_name", "Unknown")
-
-    # Ask for confirmation (simplified - in real implementation, use ConversationHandler)
-    await query.answer(
-        f"🔁 To offer {character}, use:\n/offertrade {card_id} @username",
-        show_alert=True
-    )
-
-
-# ============================================================
-# 🎁 Offer Trade Command (Simplified)
+# 🎁 Offer Trade Command
 # ============================================================
 
 async def offertrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle /offertrade <card_id> <@username|user_id> command.
-    Creates a trade offer.
-    """
+    """Handle /offertrade <card_id> <user_id> command."""
+    
     if not update.message or not update.effective_user:
         return
 
     user = update.effective_user
+    log_command(user.id, "offertrade", update.effective_chat.id)
 
     if not db.is_connected:
-        await update.message.reply_text("⚠️ Database offline.")
+        await update.message.reply_text(format_error("database"))
         return
 
     # Parse arguments
     if len(context.args) < 2:
         await update.message.reply_text(
-            "📝 *Usage:* `/offertrade <card_id> <user_id>`\n\n"
-            "Example: `/offertrade 42 123456789`\n\n"
-            "💡 Get user IDs from their profile or replies.",
+            "🔁 *Offer Trade*\n\n"
+            "Usage: `/offertrade <card_id> <user_id>`\n\n"
+            "Examples:\n"
+            "• `/offertrade 42 123456789`\n"
+            "• `/offertrade 100 987654321`\n\n"
+            "💡 Get user ID by replying to their message or from their profile.",
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
     try:
-        card_id = int(context.args[0])
-        to_user_id = int(context.args[1].replace("@", ""))
+        card_id = int(context.args[0].replace("#", ""))
+        to_user_id = int(context.args[1])
     except ValueError:
-        await update.message.reply_text("❌ Invalid card ID or user ID.")
-        return
-
-    # Validate ownership
-    owns_card = await check_user_owns_card(None, user.id, card_id)
-    if not owns_card:
-        await update.message.reply_text("❌ You don't own this card!")
-        return
-
-    # Check limit
-    pending_count = await count_pending_trades(None, user.id)
-    if pending_count >= MAX_PENDING_TRADES_PER_USER:
         await update.message.reply_text(
-            f"⚠️ You have {MAX_PENDING_TRADES_PER_USER} pending trades already.\n"
-            "Complete or cancel some first."
+            "❌ Invalid card ID or user ID.\n"
+            "Both must be numbers.",
+            parse_mode=ParseMode.MARKDOWN
         )
         return
 
-    # Create trade (gift - no requested card)
+    # Can't trade with yourself
+    if to_user_id == user.id:
+        await update.message.reply_text("❌ You can't trade with yourself!")
+        return
+
+    # Check ownership
+    owns = await check_user_owns_card(None, user.id, card_id)
+    if not owns:
+        await update.message.reply_text(
+            "❌ You don't own this card!\n"
+            "Check your collection with /harem",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # Check quantity
+    qty = await get_user_card_quantity(None, user.id, card_id)
+    if qty < 1:
+        await update.message.reply_text("❌ You don't have this card to trade!")
+        return
+
+    # Check pending limit
+    pending = await count_pending_trades(None, user.id)
+    if pending >= MAX_PENDING_TRADES:
+        await update.message.reply_text(
+            f"⚠️ You have {MAX_PENDING_TRADES} pending trades.\n"
+            f"Complete or cancel some first.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # Get card info
+    card = await get_card_by_id(None, card_id)
+    if not card:
+        await update.message.reply_text("❌ Card not found!")
+        return
+
+    char_name = card.get("character_name", "Unknown")
+    rarity = card.get("rarity", 1)
+    _, _, emoji = rarity_to_text(rarity)
+
+    # Create trade
     trade_id = await create_trade(
         pool=None,
         from_user=user.id,
@@ -450,109 +459,206 @@ async def offertrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     if trade_id:
-        card = await get_card_by_id(None, card_id)
-        character = card.get("character_name", "Card") if card else "Card"
-        
         await update.message.reply_text(
             f"✅ *Trade Offered!*\n\n"
-            f"🎁 Offering *{character}* to user `{to_user_id}`\n"
-            f"🆔 Trade ID: `{trade_id}`\n\n"
-            f"They will be notified. Use `/canceltrade {trade_id}` to cancel.",
+            f"{emoji} *{char_name}*\n"
+            f"🆔 Trade ID: `#{trade_id}`\n\n"
+            f"Waiting for user `{to_user_id}` to respond.\n"
+            f"Use `/canceltrade {trade_id}` to cancel.",
             parse_mode=ParseMode.MARKDOWN
         )
 
-        # Try to notify recipient
+        # Notify recipient
         try:
             await context.bot.send_message(
                 chat_id=to_user_id,
                 text=(
-                    f"🔁 *New Trade Request!*\n\n"
+                    f"🔔 *New Trade Request!*\n\n"
                     f"From: {user.first_name}\n"
-                    f"Offering: {character}\n\n"
-                    f"Use `/viewtrade {trade_id}` to view and accept/reject."
+                    f"Offering: {emoji} {char_name}\n\n"
+                    f"Use /trades to view and respond."
                 ),
                 parse_mode=ParseMode.MARKDOWN
             )
         except Exception as e:
             app_logger.warning(f"Failed to notify trade recipient: {e}")
     else:
-        await update.message.reply_text("❌ Failed to create trade. Please try again.")
+        await update.message.reply_text("❌ Failed to create trade. Try again.")
 
 
 # ============================================================
-# ✅ Trade Accept Callback Handler
+# 🚫 Cancel Trade Command
 # ============================================================
 
-async def trade_accept_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle trade_accept:{trade_id} callback.
-    Accepts a trade and executes the transfer.
-    """
+async def canceltrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /canceltrade <trade_id> command."""
+    
+    if not update.message or not update.effective_user:
+        return
+
+    user = update.effective_user
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/canceltrade <trade_id>`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    try:
+        trade_id = int(context.args[0].replace("#", ""))
+    except ValueError:
+        await update.message.reply_text("❌ Invalid trade ID.")
+        return
+
+    # Get trade
+    trade = await get_trade(None, trade_id)
+    
+    if not trade:
+        await update.message.reply_text("❌ Trade not found.")
+        return
+
+    # Check ownership
+    if trade["from_user"] != user.id:
+        await update.message.reply_text("❌ Only the sender can cancel this trade.")
+        return
+
+    # Check status
+    if trade["status"] != "pending":
+        await update.message.reply_text(f"❌ Trade is already {trade['status']}.")
+        return
+
+    # Cancel
+    success = await update_trade_status(None, trade_id, "cancelled")
+    
+    if success:
+        await update.message.reply_text(f"🚫 Trade `#{trade_id}` cancelled.")
+    else:
+        await update.message.reply_text("❌ Failed to cancel trade.")
+
+
+# ============================================================
+# 🔘 Callback Handlers
+# ============================================================
+
+async def trades_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle trades list callbacks."""
+    
     query = update.callback_query
+    if not query or not query.data:
+        return
 
+    data = query.data
+    user_id = query.from_user.id
+
+    # Close
+    if data == "trades_close":
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await query.answer()
+        return
+
+    # Refresh
+    if data == "trades_refresh":
+        await show_trades_list(update, context, user_id, from_callback=True)
+        return
+
+
+async def trade_view_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle trade view callback (tv:{id})."""
+    
+    query = update.callback_query
     if not query or not query.data:
         return
 
     try:
         trade_id = int(query.data.split(":")[1])
     except (ValueError, IndexError):
-        await query.answer("Invalid trade ID", show_alert=True)
+        await query.answer("Error", show_alert=True)
+        return
+
+    await show_trade_details(
+        update=update,
+        context=context,
+        trade_id=trade_id,
+        viewer_user_id=query.from_user.id,
+        from_callback=True
+    )
+
+
+async def trade_accept_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle trade accept callback (ta:{id})."""
+    
+    query = update.callback_query
+    if not query or not query.data:
+        return
+
+    try:
+        trade_id = int(query.data.split(":")[1])
+    except (ValueError, IndexError):
+        await query.answer("Error", show_alert=True)
         return
 
     user_id = query.from_user.id
 
-    # Get trade details
+    # Get trade
     trade = await get_trade(None, trade_id)
-
+    
     if not trade:
         await query.answer("Trade not found!", show_alert=True)
         return
 
-    # Validate user is recipient
+    # Verify recipient
     if trade["to_user"] != user_id:
-        await query.answer("Only the recipient can accept this trade!", show_alert=True)
+        await query.answer("Only the recipient can accept!", show_alert=True)
         return
 
-    # Validate status
+    # Verify status
     if trade["status"] != "pending":
-        await query.answer(f"Trade is {trade['status']}, cannot accept.", show_alert=True)
+        await query.answer(f"Trade is {trade['status']}", show_alert=True)
         return
 
-    # Execute the trade
+    # Execute transfer
     from_user = trade["from_user"]
     to_user = trade["to_user"]
     offered_card_id = trade["offered_card_id"]
     requested_card_id = trade.get("requested_card_id")
 
     # Transfer offered card
-    success1, msg1 = await transfer_card_between_users(None, from_user, to_user, offered_card_id, 1)
+    success, msg = await transfer_card_between_users(
+        None, from_user, to_user, offered_card_id, 1
+    )
 
-    if not success1:
+    if not success:
         await update_trade_status(None, trade_id, "failed")
-        await query.answer(f"❌ Trade failed: {msg1}", show_alert=True)
+        await query.answer(f"❌ Failed: {msg}", show_alert=True)
         return
 
-    # If requested card exists, transfer it back
+    # Transfer requested card if exists
     if requested_card_id:
-        success2, msg2 = await transfer_card_between_users(None, to_user, from_user, requested_card_id, 1)
-        
+        success2, msg2 = await transfer_card_between_users(
+            None, to_user, from_user, requested_card_id, 1
+        )
         if not success2:
-            # Rollback? (Complex - needs transaction handling)
             await update_trade_status(None, trade_id, "failed")
-            await query.answer(f"❌ Trade partially failed: {msg2}", show_alert=True)
+            await query.answer(f"❌ Partial failure: {msg2}", show_alert=True)
             return
 
-    # Mark as completed
+    # Complete trade
     await update_trade_status(None, trade_id, "completed")
 
-    # Notify both users
     offered_char = trade.get("offered_character", "Card")
-    
+    _, _, emoji = rarity_to_text(trade.get("offered_rarity", 1))
+
     await query.answer("✅ Trade completed!", show_alert=True)
-    await query.message.reply_text(
-        f"🎉 *Trade Completed!*\n\n"
-        f"You received: {offered_char}\n\n"
-        f"Check your collection!",
+
+    # Update message
+    await query.edit_message_text(
+        f"✅ *Trade Completed!*\n\n"
+        f"You received: {emoji} *{offered_char}*\n\n"
+        f"Check your /harem!",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -562,7 +668,8 @@ async def trade_accept_callback(update: Update, context: ContextTypes.DEFAULT_TY
             chat_id=from_user,
             text=(
                 f"✅ *Trade Accepted!*\n\n"
-                f"Your trade for {offered_char} was accepted by {query.from_user.first_name}!"
+                f"{query.from_user.first_name} accepted your trade.\n"
+                f"They received: {emoji} {offered_char}"
             ),
             parse_mode=ParseMode.MARKDOWN
         )
@@ -570,104 +677,91 @@ async def trade_accept_callback(update: Update, context: ContextTypes.DEFAULT_TY
         pass
 
 
-# ============================================================
-# ❌ Trade Reject Callback Handler
-# ============================================================
-
 async def trade_reject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle trade_reject:{trade_id} callback.
-    Rejects a trade request.
-    """
+    """Handle trade reject callback (tr:{id})."""
+    
     query = update.callback_query
-
     if not query or not query.data:
         return
 
     try:
         trade_id = int(query.data.split(":")[1])
     except (ValueError, IndexError):
-        await query.answer("Invalid trade ID", show_alert=True)
+        await query.answer("Error", show_alert=True)
         return
 
     user_id = query.from_user.id
 
-    # Get trade details
+    # Get trade
     trade = await get_trade(None, trade_id)
-
+    
     if not trade:
         await query.answer("Trade not found!", show_alert=True)
         return
 
-    # Validate user is recipient
     if trade["to_user"] != user_id:
-        await query.answer("Only the recipient can reject this trade!", show_alert=True)
+        await query.answer("Only the recipient can reject!", show_alert=True)
         return
 
-    # Update status
-    success = await update_trade_status(None, trade_id, "rejected")
+    # Reject
+    await update_trade_status(None, trade_id, "rejected")
+    await query.answer("Trade rejected")
 
-    if success:
-        await query.answer("❌ Trade rejected", show_alert=True)
-        
-        # Notify sender
-        try:
-            offered_char = trade.get("offered_character", "your card")
-            await context.bot.send_message(
-                chat_id=trade["from_user"],
-                text=(
-                    f"❌ *Trade Rejected*\n\n"
-                    f"Your offer for {offered_char} was declined by {query.from_user.first_name}."
-                ),
-                parse_mode=ParseMode.MARKDOWN
-            )
-        except Exception:
-            pass
-    else:
-        await query.answer("Failed to reject trade.", show_alert=True)
+    await query.edit_message_text(
+        f"❌ *Trade Rejected*\n\n"
+        f"Trade `#{trade_id}` has been declined.",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
+    # Notify sender
+    try:
+        await context.bot.send_message(
+            chat_id=trade["from_user"],
+            text=(
+                f"❌ *Trade Rejected*\n\n"
+                f"{query.from_user.first_name} declined your trade offer."
+            ),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception:
+        pass
 
-# ============================================================
-# 🚫 Trade Cancel Callback Handler
-# ============================================================
 
 async def trade_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle trade_cancel:{trade_id} callback.
-    Cancels a trade (by sender only).
-    """
+    """Handle trade cancel callback (tc:{id})."""
+    
     query = update.callback_query
-
     if not query or not query.data:
         return
 
     try:
         trade_id = int(query.data.split(":")[1])
     except (ValueError, IndexError):
-        await query.answer("Invalid trade ID", show_alert=True)
+        await query.answer("Error", show_alert=True)
         return
 
     user_id = query.from_user.id
 
-    # Get trade details
+    # Get trade
     trade = await get_trade(None, trade_id)
-
+    
     if not trade:
         await query.answer("Trade not found!", show_alert=True)
         return
 
-    # Validate user is sender
     if trade["from_user"] != user_id:
-        await query.answer("Only the sender can cancel this trade!", show_alert=True)
+        await query.answer("Only the sender can cancel!", show_alert=True)
         return
 
-    # Update status
-    success = await update_trade_status(None, trade_id, "cancelled")
+    # Cancel
+    await update_trade_status(None, trade_id, "cancelled")
+    await query.answer("Trade cancelled")
 
-    if success:
-        await query.answer("🚫 Trade cancelled", show_alert=True)
-    else:
-        await query.answer("Failed to cancel trade.", show_alert=True)
+    await query.edit_message_text(
+        f"🚫 *Trade Cancelled*\n\n"
+        f"Trade `#{trade_id}` has been cancelled.",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 
 # ============================================================
@@ -675,29 +769,29 @@ async def trade_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
 # ============================================================
 
 def register_trade_handlers(application: Application) -> None:
-    """
-    Register trade-related handlers.
+    """Register trade handlers."""
     
-    Args:
-        application: Telegram bot application
-    """
-    # Command handlers
+    # Commands
     application.add_handler(CommandHandler("trades", trades_command))
-    application.add_handler(CommandHandler("viewtrade", viewtrade_command))
     application.add_handler(CommandHandler("offertrade", offertrade_command))
+    application.add_handler(CommandHandler("trade", offertrade_command))  # Alias
+    application.add_handler(CommandHandler("canceltrade", canceltrade_command))
 
-    # Callback query handlers
+    # Callbacks
     application.add_handler(
-        CallbackQueryHandler(trade_start_callback, pattern=r"^trade_start:")
+        CallbackQueryHandler(trades_callback_handler, pattern=r"^trades_")
     )
     application.add_handler(
-        CallbackQueryHandler(trade_accept_callback, pattern=r"^trade_accept:")
+        CallbackQueryHandler(trade_view_callback, pattern=r"^tv:")
     )
     application.add_handler(
-        CallbackQueryHandler(trade_reject_callback, pattern=r"^trade_reject:")
+        CallbackQueryHandler(trade_accept_callback, pattern=r"^ta:")
     )
     application.add_handler(
-        CallbackQueryHandler(trade_cancel_callback, pattern=r"^trade_cancel:")
+        CallbackQueryHandler(trade_reject_callback, pattern=r"^tr:")
+    )
+    application.add_handler(
+        CallbackQueryHandler(trade_cancel_callback, pattern=r"^tc:")
     )
 
     app_logger.info("✅ Trade handlers registered")
